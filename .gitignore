@@ -7,10 +7,13 @@ __pycache__/
 # training output
 runs/
 results/
+paper/
 *.pt
 *.pth
+*.ckpt
 
 # data -- downloaded from Kaggle, never committed
+LunarRM/
 data/
 *.npy
 
