@@ -62,6 +62,7 @@ Examples
 import argparse
 import csv
 import json
+import math
 import os
 import random
 import sys
@@ -77,6 +78,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels 
 from radiounet import RadioWNet, trains_in_phase  
+from boundary import masked_gradient_loss
+from experiment_provenance import collect_provenance, first_stage_hash
 
 
 def load_dataset_module(data_root):
@@ -136,12 +139,27 @@ def unpack(batch, device):
             m.to(device, non_blocking=True))
 
 
-def compute_loss(pred, y, m, kind):
+def compute_loss(pred, y, m, kind, grad_weight=0.0, return_components=False):
     if kind == "masked":
         se = (pred - y) ** 2 * m
         denom = m.sum()
-        return se.sum() / denom if denom > 0 else se.sum() * 0.0
-    return nn.functional.mse_loss(pred, y)
+        mse = se.sum() / denom if denom > 0 else se.sum() * 0.0
+    else:
+        mse = nn.functional.mse_loss(pred, y)
+    if grad_weight or return_components:
+        gradient = masked_gradient_loss(pred if grad_weight else pred.detach(), y, m)
+    else:
+        gradient = mse.detach() * 0.0
+    # Preserve the original value AND backward path exactly when lambda=0.
+    total = mse + grad_weight * gradient if grad_weight else mse
+    return (total, mse, gradient) if return_components else total
+
+
+def check_resume_grad_weight(checkpoint, grad_weight):
+    previous = float(checkpoint.get("args", {}).get("grad_weight", 0.0))
+    if previous != grad_weight:
+        raise ValueError(f"Cannot resume with --grad-weight {grad_weight}; checkpoint used "
+                         f"{previous}. Use --init-from and a new run for a different loss.")
 
 
 @torch.no_grad()
@@ -179,8 +197,7 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
     y = torch.stack(ys).to(device)
     m = torch.stack(ms).to(device) if ms else None
     out = model(x)
-    # In secondU the trained output is a correction on top of the frozen first
-    # U-Net; pass that baseline so the panels can show the correction itself.
+    # out2 is a direct prediction; the plot shows its difference from firstU.
     base = out[0].float() if out_idx == 1 else None
     return save_example_panels(path, x, out[out_idx].float(), y, m, lo, scale,
                                names, max_examples=len(indices), base=base,
@@ -188,6 +205,10 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
 
 
 def main(args):
+    if not math.isfinite(args.grad_weight) or args.grad_weight < 0:
+        raise ValueError("--grad-weight must be finite and non-negative")
+    if args.grad_weight and args.loss != "masked":
+        raise ValueError("--grad-weight requires --loss masked")
     ld = load_dataset_module(args.data_root)
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -222,14 +243,18 @@ def main(args):
     ckpt_last = os.path.join(args.out, f"{args.run_name}_last.pt")
     ckpt_best = os.path.join(args.out, f"{args.run_name}_best.pt")
     hist_path = os.path.join(args.out, f"{args.run_name}_history.csv")
+    loss_path = os.path.join(args.out, f"{args.run_name}_loss_components.csv")
 
     start_epoch = 0
     best = float("inf")
     resumed = False
+    checkpoint_sources = {}
     if args.resume:
         path = ckpt_last if args.resume == "auto" else args.resume
         if os.path.exists(path):
             ck = torch.load(path, map_location=device)
+            check_resume_grad_weight(ck, args.grad_weight)
+            checkpoint_sources["resume"] = path
             model.load_state_dict(ck["model"])
             opt.load_state_dict(ck["opt"])
 
@@ -265,6 +290,7 @@ def main(args):
     if args.init_from and not resumed:
         path = resolve_init_from(args)
         ck = torch.load(path, map_location=device)
+        checkpoint_sources["init_from"] = path
         prev = ck.get("args", {})
         if prev.get("band", args.band) != args.band:
             raise SystemExit(f"--init-from {path} was trained on band "
@@ -278,25 +304,40 @@ def main(args):
               "U-Net is untrained, so its output is noise. Pass --init-from "
               "<firstU checkpoint>.")
 
+    provenance = collect_provenance(args.data_root, ld, checkpoint_sources, args)
+    provenance["firstU_state_sha256"] = first_stage_hash(model.state_dict())
+    # On resume retain the original initialization record as well.
+    prov_path = os.path.join(args.out, f"{args.run_name}_provenance.json")
+    if resumed and os.path.exists(prov_path):
+        with open(prov_path, encoding="utf-8") as handle:
+            previous = json.load(handle)
+        provenance["initial_run"] = previous.get("initial_run", previous)
+    with open(prov_path, "w", encoding="utf-8") as handle:
+        json.dump(provenance, handle, ensure_ascii=False, indent=2)
+
     n_val = len(val_loader.dataset)
     k = min(args.panels, n_val)
     panel_idx = ([int(round(i * (n_val - 1) / max(k - 1, 1))) for i in range(k)]
                  if k > 0 else [])
 
     print(f"training {args.run_name}: band={args.band} loss={args.loss} "
-          f"phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB")
+          f"phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
+          f"grad_weight={args.grad_weight:g}")
 
     hist_cols = None
     for epoch in range(start_epoch, args.epochs):
         model.train()
         t0 = time.time()
         running, seen = 0.0, 0
+        running_mse, running_gradient = 0.0, 0.0
         for i, batch in enumerate(train_loader):
             x, y, m = unpack(batch, device)
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=args.amp and device.type == "cuda"):
                 pred = model(x)[out_idx]
-                loss = compute_loss(pred.float(), y, m, args.loss)
+                loss, mse_loss, gradient_loss = compute_loss(
+                    pred.float(), y.float(), m.float(), args.loss,
+                    args.grad_weight, return_components=True)
             scaler.scale(loss).backward()
             if args.clip:
                 scaler.unscale_(opt)
@@ -305,6 +346,8 @@ def main(args):
             scaler.update()
 
             running += loss.item() * x.size(0)
+            running_mse += mse_loss.item() * x.size(0)
+            running_gradient += gradient_loss.item() * x.size(0)
             seen += x.size(0)
             if args.log_every and i % args.log_every == 0:
                 print(f"  ep{epoch} [{i}/{len(train_loader)}] loss {loss.item():.6f}",
@@ -331,6 +374,16 @@ def main(args):
         row = {"epoch": epoch, "train_loss": train_loss, "lr": epoch_lr,
                "epoch_seconds": round(dt, 1),
                **{k: v for k, v in metrics.items()}}
+        # Separate CSV keeps legacy history headers resumable without rewriting.
+        component_row = {"epoch": epoch, "train_mse": running_mse / max(seen, 1),
+                         "train_gradient": running_gradient / max(seen, 1),
+                         "grad_weight": args.grad_weight, "train_total": train_loss}
+        new_components = not os.path.exists(loss_path) or epoch == 0
+        with open(loss_path, "w" if new_components else "a", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(component_row))
+            if new_components:
+                writer.writeheader()
+            writer.writerow(component_row)
         if hist_cols is None:
             hist_cols = list(row)
             new_file = not os.path.exists(hist_path) or start_epoch == 0
@@ -366,6 +419,7 @@ def main(args):
 
     with open(os.path.join(args.out, f"{args.run_name}_summary.json"), "w") as f:
         json.dump({"run": args.run_name, "band": args.band, "loss": args.loss,
+                   "grad_weight": args.grad_weight,
                    "phase": args.phase, "init_from": args.init_from,
                    "selection_metric": "val/rmse_db_masked",
                    "best": best, "epochs": args.epochs}, f, indent=2)
@@ -385,6 +439,8 @@ def build_parser():
                         "fill too and is kept only as an ablation; either way the "
                         "run is selected and ranked on valid pixels.")
     p.add_argument("--phase", default="firstU", choices=["firstU", "secondU"])
+    p.add_argument("--grad-weight", type=float, default=0.0,
+                   help="weight of valid-pair signed gradient L1 loss (normalized targets); default 0 preserves baseline")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -427,6 +483,8 @@ if __name__ == "__main__":
     a = build_parser().parse_args()
     if a.run_name is None:
         a.run_name = f"radiownet_{a.band}_{a.loss}_{a.phase}"
+        if a.grad_weight:
+            a.run_name += "_grad" + f"{a.grad_weight:g}".replace(".", "p")
     # The second stage is useless on top of a random first U-Net, so it seeds
     # itself from the firstU run by default; "none" is the explicit opt-out.
     if a.init_from is None and a.phase == "secondU":

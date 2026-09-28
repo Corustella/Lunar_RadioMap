@@ -50,6 +50,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels, ssim  
 from radiounet import RadioWNet  # noqa: E402
+from boundary import BoundaryReport, save_boundary_example
+from experiment_provenance import collect_provenance, first_stage_hash
 
 BANDS = ("415", "58")
 
@@ -100,6 +102,10 @@ class ScoredSet(Dataset):
 
 
 def main(args):
+    if args.boundary_out and args.no_mask:
+        raise ValueError("--boundary-out requires the official validity mask")
+    if args.boundary_out and os.path.exists(args.boundary_out):
+        raise FileExistsError(f"Refusing to overwrite boundary diagnostics: {args.boundary_out}")
     ld = load_dataset_module(args.data_root)
     device = torch.device(args.device)
 
@@ -144,6 +150,14 @@ def main(args):
         accs.update({b: MetricAccumulator(scale) for b in BANDS})
     per_sample = []
     amp = args.amp and device.type == "cuda"
+    boundary = BoundaryReport(args.boundary_out) if args.boundary_out else None
+    # Always retain the original eight evenly spaced diagnostic examples.
+    def example_indices(count):
+        k = min(count, len(ds))
+        return {int(round(i * (len(ds) - 1) / max(k - 1, 1))) for i in range(k)}
+    panel_indices = example_indices(args.panels)
+    boundary_indices = example_indices(8) if boundary else set()
+    cached = {}
 
     with torch.no_grad():
         for bi, (x, y, m, names, bands) in enumerate(loader):
@@ -154,8 +168,24 @@ def main(args):
             m = m.to(device, non_blocking=True) if need_mask else None
 
             with torch.autocast("cuda", enabled=amp):
-                pred = model(x)[out_idx]
+                outputs = model(x)
+                pred = outputs[out_idx]
             pred = pred.float()
+
+            if boundary:
+                predictions = {phase: pred}
+                if out_idx == 1:
+                    predictions["firstU"] = outputs[0].float()
+                boundary.update(predictions, y, m, names, bands, scale)
+            start_index = len(per_sample)
+            for j, name in enumerate(names):
+                index = start_index + j
+                if index in panel_indices | boundary_indices:
+                    cached[index] = {"name": name, "input": x[j].detach().cpu(),
+                                     "target": y[j].detach().cpu(),
+                                     "prediction": pred[j].detach().cpu(),
+                                     "mask": m[j].detach().cpu() if m is not None else None,
+                                     "base": outputs[0][j].float().detach().cpu() if out_idx == 1 else None}
 
             accs["all"].update(pred, y, m)
             if band == "both":
@@ -204,31 +234,34 @@ def main(args):
     for b, mb in per_band.items():
         print(f"  [{b}] " + "  ".join(f"{k} {v:.4f}" for k, v in mb.items()))
 
-    if args.panels:
-        k = min(args.panels, len(ds))
-        idxs = [int(round(i * (len(ds) - 1) / max(k - 1, 1))) for i in range(k)]
-        xs, ys, ms, names = [], [], [], []
-        for i in idxs:
-            xi, yi, mi, name, _ = ds[i]
-            xs.append(xi)
-            ys.append(yi)
-            if need_mask:
-                ms.append(mi)
-            names.append(name)
-        xb = torch.stack(xs).to(device)
-        yb = torch.stack(ys).to(device)
-        mb_ = torch.stack(ms).to(device) if ms else None
-        with torch.no_grad():
-            out = model(xb)
+    if args.panels and cached:
+        samples = [cached[i] for i in sorted(panel_indices & cached.keys())]
         path = args.panels_out or (
             os.path.splitext(args.out)[0] + "_panels.png" if args.out
+            else os.path.join(args.boundary_out, "panels.png") if boundary
             else "panels.png")
-        p = save_example_panels(path, xb, out[out_idx].float(), yb, mb_, lo, scale,
-                                names, max_examples=len(idxs),
-                                base=out[0].float() if out_idx == 1 else None,
-                                err_lim=args.panel_err_lim)
-        if p:
-            print(f"wrote {p}")
+        if samples:
+            p = save_example_panels(
+                path, torch.stack([s["input"] for s in samples]),
+                torch.stack([s["prediction"] for s in samples]),
+                torch.stack([s["target"] for s in samples]),
+                torch.stack([s["mask"] for s in samples]) if need_mask else None,
+                lo, scale, [s["name"] for s in samples], max_examples=len(samples),
+                base=torch.stack([s["base"] for s in samples]) if out_idx == 1 else None,
+                err_lim=args.panel_err_lim, mask_invalid=boundary is not None)
+            if p:
+                print(f"wrote {p}")
+
+    if boundary:
+        examples = [save_boundary_example(args.boundary_out, cached[i], lo, scale,
+                                          args.panel_err_lim)
+                    for i in sorted(boundary_indices & cached.keys())]
+        provenance = collect_provenance(args.data_root, ld, {"evaluated": args.ckpt}, args)
+        provenance["firstU_state_sha256"] = first_stage_hash(model.state_dict())
+        provenance["forward_precision"] = "cuda autocast float16" if amp else "float32"
+        provenance["predictions_and_plots"] = "Same forward pass as the main scoring loop; no panel re-inference."
+        boundary.finish(provenance, summary, examples)
+        print(f"wrote boundary diagnostics to {args.boundary_out}")
 
     if args.out:
         d = os.path.dirname(os.path.abspath(args.out))
@@ -240,7 +273,7 @@ def main(args):
         print(f"wrote {args.out}")
 
 
-if __name__ == "__main__":
+def build_parser():
     p = argparse.ArgumentParser(
         description="Score a RadioWNet checkpoint on the val or test split.")
     p.add_argument("--ckpt", required=True)
@@ -264,8 +297,14 @@ if __name__ == "__main__":
     p.add_argument("--limit", type=int, default=0, help="stop after ~N samples")
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--out", default=None, help="results JSON")
+    p.add_argument("--boundary-out", default=None,
+                   help="new directory for mask-aware boundary statistics, cached examples and provenance")
     p.add_argument("--panels", type=int, default=8,
                    help="example panels to render (0 disables)")
     p.add_argument("--panels-out", default=None)
     p.add_argument("--panel-err-lim", type=float, default=10.0)
-    main(p.parse_args())
+    return p
+
+
+if __name__ == "__main__":
+    main(build_parser().parse_args())

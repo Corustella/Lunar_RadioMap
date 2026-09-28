@@ -24,6 +24,7 @@ is not comparable to the unmasked one.
 Plain torch, so nothing here needs torchmetrics or skimage.
 """
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -139,16 +140,16 @@ class MetricAccumulator:
 
 
 def save_example_panels(path, x, pred, target, mask, lo, scale, names,
-                        max_examples=6, base=None, err_lim=10.0):
+                        max_examples=6, base=None, err_lim=10.0, mask_invalid=False):
     """Write a PNG comparing inputs, prediction, ground truth and error.
 
     Returns the path written, or None if matplotlib is unavailable -- a missing
     plotting stack must never kill a training run.
 
     ``base`` is the first U-Net's output when scoring the secondU phase. The
-    refinement is a small correction on top of it, so a panel of the composite
-    prediction looks the same every epoch; passing ``base`` adds a panel of
-    ``pred - base``, which is the part that actually trains.
+    secondU is a direct prediction; passing ``base`` adds a panel of
+    ``pred - base`` to show the change. ``mask_invalid`` also switches row
+    labels to the masked scoring metric and paints invalid pixels gray.
 
     ``err_lim`` fixes the error color scale in dB. Auto-scaling it per epoch
     makes a shrinking error render identically every time, only the colorbar
@@ -172,30 +173,41 @@ def save_example_panels(path, x, pred, target, mask, lo, scale, names,
         p_db = pred[i, 0].detach().cpu().float().numpy() * scale + lo
         t_db = target[i, 0].detach().cpu().float().numpy() * scale + lo
         m = mask[i, 0].detach().cpu().numpy() if mask is not None else None
+        take = m > 0 if mask_invalid and m is not None else np.ones_like(p_db, dtype=bool)
         b_db = (base[i, 0].detach().cpu().float().numpy() * scale + lo
                 if base is not None else None)
-        vmin = min(p_db.min(), t_db.min())
-        vmax = max(p_db.max(), t_db.max())
+        vmin = min(p_db[take].min(), t_db[take].min()) if take.any() else lo
+        vmax = max(p_db[take].max(), t_db[take].max()) if take.any() else lo + scale
+        # Subtract before scaling, matching the numerical evaluation loop.
+        error_db = (pred[i, 0].detach().cpu().float().numpy()
+                    - target[i, 0].detach().cpu().float().numpy()) * scale
 
         panels = [
             ("heightmap", hm, "terrain", None, None),
             ("TX", tx, "hot", 0, 1),
             ("ground truth (dB)", t_db, "viridis", vmin, vmax),
             ("prediction (dB)", p_db, "viridis", vmin, vmax),
-            (f"error (dB, +/-{err_lim:g})", p_db - t_db, "coolwarm", -err_lim, err_lim),
+            (f"error (dB, +/-{err_lim:g})", error_db, "coolwarm", -err_lim, err_lim),
         ]
         if b_db is not None:
             ref = p_db - b_db
-            rlim = max(abs(ref).max(), 1e-6)
+            rlim = max(abs(ref[take]).max(), 1e-6) if take.any() else 1e-6
             panels.append((f"refinement (dB, +/-{rlim:.2f})", ref, "coolwarm", -rlim, rlim))
         if m is not None:
             panels.append(("valid mask", m, "gray", 0, 1))
 
-        rmse = float(((p_db - t_db) ** 2).mean() ** 0.5)
-        label = f"{names[i]}   RMSE {rmse:.2f} dB"
+        rmse = float((error_db[take] ** 2).mean() ** 0.5) if take.any() else float("nan")
+        metric = "masked RMSE" if mask_invalid else "RMSE"
+        label = f"{names[i]}   {metric} {rmse:.2f} dB"
         if b_db is not None:
-            base_rmse = float(((b_db - t_db) ** 2).mean() ** 0.5)
+            base_error = (base[i, 0].detach().cpu().float().numpy()
+                          - target[i, 0].detach().cpu().float().numpy()) * scale
+            base_rmse = float((base_error[take] ** 2).mean() ** 0.5) if take.any() else float("nan")
             label += f"  (first U {base_rmse:.2f} dB, delta {rmse - base_rmse:+.2f})"
+        if mask_invalid and m is not None:
+            panels = [(title, np.ma.masked_where(~take, data)
+                       if title not in ("heightmap", "TX", "valid mask") else data,
+                       cmap, v0, v1) for title, data, cmap, v0, v1 in panels]
         rows.append((panels, label))
 
     ncol = max(len(p) for p, _ in rows)
@@ -210,6 +222,9 @@ def save_example_panels(path, x, pred, target, mask, lo, scale, names,
             if c >= len(panels):
                 continue
             title, data, cmap, v0, v1 = panels[c]
+            if mask_invalid:
+                cmap = plt.get_cmap(cmap).copy()
+                cmap.set_bad("0.75")
             im = ax.imshow(data, cmap=cmap, vmin=v0, vmax=v1)
             # column headings once, on the top row only
             if r == 0:
@@ -224,7 +239,9 @@ def save_example_panels(path, x, pred, target, mask, lo, scale, names,
     for r, (_, label) in enumerate(rows):
         pos = axes[r][0].get_position()
         # on the top row the label has to clear the column headings
-        fig.text(pos.x0, pos.y1 + (0.030 if r == 0 else 0.008), label, fontsize=9,
+        # A single-row smoke panel also needs physical room above column titles.
+        offset = max(0.030, 0.26 / fig.get_figheight()) if r == 0 else 0.008
+        fig.text(pos.x0, pos.y1 + offset, label, fontsize=9,
                  fontweight="bold", ha="left", va="bottom")
     d = os.path.dirname(os.path.abspath(path))
     if d:
