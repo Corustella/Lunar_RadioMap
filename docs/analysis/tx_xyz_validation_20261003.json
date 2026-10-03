@@ -1,0 +1,126 @@
+{
+  "date": "2026-10-03",
+  "scope": "LOCAL initialization checks only, three val inputs; no training gain or full-val evaluation",
+  "torch": "2.5.1+cu121",
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "indices": [
+    0,
+    1165,
+    2329
+  ],
+  "actual_loader": {
+    "path": "D:\\codes\\LunarRadiomap\\LunarRM\\lunar_dataset.py",
+    "bytes": 12541,
+    "sha256": "ca5a1f303e3f25a3feb36850466ba0e5a7f6d30373d83f270bfb4fbd7f097f02"
+  },
+  "baseline": {
+    "path": "D:\\ssh_download\\boundary_ablation_v1\\seed0_grad0\\radiownet_58_masked_secondU_best.pt",
+    "bytes": 71984359,
+    "sha256": "46c998a3254ee42946a59bbaae9c8596758d02cbdb9150f59b5c0aea8e3eb836"
+  },
+  "feature_config": {
+    "version": 1,
+    "grid": [
+      256,
+      256
+    ],
+    "resolution_m_per_px": 1.0,
+    "heightmap_range_m": [
+      0.0,
+      496.0
+    ],
+    "tx_height_m_agl": 3.0,
+    "rx_height_m_agl": 1.0
+  },
+  "raw_dz_max_abs_normalized": [
+    7.450580596923828e-09,
+    2.9802322387695312e-08,
+    3.725290298461914e-09
+  ],
+  "initial_output_checks": [
+    {
+      "mode": "zeros",
+      "device": "cpu",
+      "dtype": "torch.float64",
+      "amp": false,
+      "sample_max_abs_normalized": [
+        0.0,
+        2.220446049250313e-16,
+        0.0
+      ],
+      "tolerance_normalized": 1e-12,
+      "max_abs_db": 4.618527782440651e-14
+    },
+    {
+      "mode": "tx_xyz",
+      "device": "cpu",
+      "dtype": "torch.float64",
+      "amp": false,
+      "sample_max_abs_normalized": [
+        0.0,
+        2.220446049250313e-16,
+        0.0
+      ],
+      "tolerance_normalized": 1e-12,
+      "max_abs_db": 4.618527782440651e-14
+    },
+    {
+      "mode": "zeros",
+      "device": "cuda",
+      "dtype": "torch.float32",
+      "amp": false,
+      "sample_max_abs_normalized": [
+        2.2470951080322266e-05,
+        1.7523765563964844e-05,
+        6.9141387939453125e-06
+      ],
+      "tolerance_normalized": 5e-05,
+      "max_abs_db": 0.004673957824707031
+    },
+    {
+      "mode": "tx_xyz",
+      "device": "cuda",
+      "dtype": "torch.float32",
+      "amp": false,
+      "sample_max_abs_normalized": [
+        1.8775463104248047e-05,
+        1.8775463104248047e-05,
+        2.86102294921875e-06
+      ],
+      "tolerance_normalized": 5e-05,
+      "max_abs_db": 0.0039052963256835938
+    },
+    {
+      "mode": "zeros",
+      "device": "cuda",
+      "dtype": "torch.float32",
+      "amp": true,
+      "sample_max_abs_normalized": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tolerance_normalized": 0.001,
+      "max_abs_db": 0.0
+    },
+    {
+      "mode": "tx_xyz",
+      "device": "cuda",
+      "dtype": "torch.float32",
+      "amp": true,
+      "sample_max_abs_normalized": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tolerance_normalized": 0.001,
+      "max_abs_db": 0.0
+    }
+  ],
+  "numerical_note": "Initial GPU FP32 tolerance 1e-6 failed (max 1.59e-5); exact padding/unit checks plus float64 checks distinguish accumulation rounding from incorrect weight migration. Conv channel changes can select different kernels. TF32 disabled here. Expanded zeros and tx_xyz share shape; this is not a throughput benchmark.",
+  "unit_and_integration_tests": {
+    "count": 23,
+    "passed": 23
+  },
+  "firstU_state_sha256": "941d54c33a6db587df7da5d1712f313a73ee3ff5e242ae1b689c3e868f32f2c2"
+}

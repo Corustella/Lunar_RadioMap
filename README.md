@@ -122,6 +122,36 @@ withheld test set, over valid pixels:
 Two stages: `--phase firstU` trains the coarse U-Net, `--phase secondU` the
 refinement on top of it (`--init-from auto` picks up the matching firstU run).
 
+### TX-relative geometry ablation
+
+`train.py --phase secondU --second-features tx_xyz --grad-weight 0
+--init-from <baseline.pt>` adds three signed feature maps only to secondU:
+`dx=(col-tx_col)/255`, `dy=(row-tx_row)/255`, and
+`dz=(height_m-height_at_tx_m+rx_height_agl-tx_height_agl)/height_range_m`.
+The fixed scales and antenna heights come from training `metadata.json`.
+Features are rebuilt from the normalized height and one-hot TX after data
+augmentation. `--second-features zeros` uses the same architecture with three
+zero maps. Both modes add 2,115 weights, initialized to zero; firstU is unchanged.
+The default `none` retains baseline behavior and legacy checkpoint loading.
+`evaluate.py` restores the mode/scales from the checkpoint automatically.
+
+The paired runner inherits the trained 5.8 GHz, masked, gradient-weight-zero
+baseline's settings, initializes both groups from its **full secondU weights**,
+and restarts the optimizer/schedule. This tests additional fine-tuning with
+geometry against additional fine-tuning with zero channels. It writes only to
+a new directory; without `--execute` it prints a read-only plan:
+
+```bash
+python ablate_coordinates.py --data-root <data> --baseline-ckpt <baseline_secondU_best.pt> --out-root runs/tx_xyz_seed0 --seed 0
+```
+
+Add `--smoke --execute` for one epoch / three batches per group in a separate
+output directory, then `--execute` without `--smoke` for the full paired run.
+Full runs use the recorded 150-epoch budget per group and evaluate the official
+val split, including mask-safe boundary diagnostics and `comparison.csv`.
+Full-val RMSE improvement has not yet been established. Detailed rationale,
+local validation and server commands are in [the experiment protocol](docs/tx-xyz-ablation.md).
+
 ---
 
 ## Submitting

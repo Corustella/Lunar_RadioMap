@@ -42,7 +42,7 @@ def collect_provenance(data_root, loader_module, checkpoints, args):
     code = [root / name for name in (
         "train.py", "evaluate.py", "metrics.py", "boundary.py", "radiounet.py",
         "lunar_dataset.py", "RadioUNet/modules.py", "experiment_provenance.py",
-        "ablate_boundary.py")]
+        "ablate_boundary.py", "ablate_coordinates.py")]
 
     def git(*command):
         try:

@@ -77,7 +77,8 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels 
-from radiounet import RadioWNet, trains_in_phase  
+from radiounet import (RadioWNet, trains_in_phase, SECOND_FEATURES,
+                       geometry_config, load_model_state)
 from boundary import masked_gradient_loss
 from experiment_provenance import collect_provenance, first_stage_hash
 
@@ -107,7 +108,11 @@ def resolve_init_from(args):
     """
     if args.init_from != "auto":
         return args.init_from
-    stem = (args.run_name.replace("secondU", "firstU") if "secondU" in args.run_name
+    run_name = args.run_name
+    feature_suffix = "_" + args.second_features
+    if args.second_features != "none" and run_name.endswith(feature_suffix):
+        run_name = run_name[:-len(feature_suffix)]
+    stem = (run_name.replace("secondU", "firstU") if "secondU" in run_name
             else f"radiownet_{args.band}_{args.loss}_firstU")
     for suffix in ("_best.pt", "_last.pt"):
         cand = os.path.join(args.out, stem + suffix)
@@ -209,6 +214,8 @@ def main(args):
         raise ValueError("--grad-weight must be finite and non-negative")
     if args.grad_weight and args.loss != "masked":
         raise ValueError("--grad-weight requires --loss masked")
+    if args.second_features != "none" and args.phase != "secondU":
+        raise ValueError("--second-features trains only secondU; firstU must stay fixed")
     ld = load_dataset_module(args.data_root)
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -221,7 +228,9 @@ def main(args):
     in_ch = 3 if args.band == "both" else 2
 
     out_idx = 0 if args.phase == "firstU" else 1
-    model = RadioWNet(inputs=in_ch, phase=args.phase).to(device)
+    feature_config = geometry_config(ds.meta) if args.second_features != "none" else None
+    model = RadioWNet(inputs=in_ch, phase=args.phase,
+                     second_features=args.second_features, feature_config=feature_config).to(device)
     
     for pname, prm in model.named_parameters():
         prm.requires_grad_(trains_in_phase(pname, args.phase))
@@ -249,13 +258,14 @@ def main(args):
     best = float("inf")
     resumed = False
     checkpoint_sources = {}
+    weight_loading = None
     if args.resume:
         path = ckpt_last if args.resume == "auto" else args.resume
         if os.path.exists(path):
             ck = torch.load(path, map_location=device)
             check_resume_grad_weight(ck, args.grad_weight)
             checkpoint_sources["resume"] = path
-            model.load_state_dict(ck["model"])
+            weight_loading = load_model_state(model, ck)
             opt.load_state_dict(ck["opt"])
 
             prev_sched = ck.get("lr_sched", "step")
@@ -295,7 +305,7 @@ def main(args):
         if prev.get("band", args.band) != args.band:
             raise SystemExit(f"--init-from {path} was trained on band "
                              f"{prev.get('band')}, this run is band {args.band}")
-        model.load_state_dict(ck["model"])
+        weight_loading = load_model_state(model, ck, initialize=True)
         print(f"initialized weights from {path} (phase {prev.get('phase', '?')}, "
               f"epoch {ck.get('epoch')}, best {ck.get('best', float('nan')):.4f} dB); "
               f"optimizer and LR schedule start fresh")
@@ -306,6 +316,9 @@ def main(args):
 
     provenance = collect_provenance(args.data_root, ld, checkpoint_sources, args)
     provenance["firstU_state_sha256"] = first_stage_hash(model.state_dict())
+    provenance["second_features"] = args.second_features
+    provenance["feature_config"] = feature_config
+    provenance["weight_loading"] = weight_loading
     # On resume retain the original initialization record as well.
     prov_path = os.path.join(args.out, f"{args.run_name}_provenance.json")
     if resumed and os.path.exists(prov_path):
@@ -322,7 +335,7 @@ def main(args):
 
     print(f"training {args.run_name}: band={args.band} loss={args.loss} "
           f"phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
-          f"grad_weight={args.grad_weight:g}")
+          f"grad_weight={args.grad_weight:g} second_features={args.second_features}")
 
     hist_cols = None
     for epoch in range(start_epoch, args.epochs):
@@ -409,7 +422,7 @@ def main(args):
         state = {"model": model.state_dict(), "opt": opt.state_dict(),
                  "sched": sched.state_dict(), "lr_sched": args.lr_sched,
                  "epoch": epoch, "best": best, "args": vars(args),
-                 "metrics": metrics}
+                 "metrics": metrics, "feature_config": feature_config}
         torch.save(state, ckpt_last)
         if sel < best:
             best = sel
@@ -421,6 +434,7 @@ def main(args):
         json.dump({"run": args.run_name, "band": args.band, "loss": args.loss,
                    "grad_weight": args.grad_weight,
                    "phase": args.phase, "init_from": args.init_from,
+                   "second_features": args.second_features, "feature_config": feature_config,
                    "selection_metric": "val/rmse_db_masked",
                    "best": best, "epochs": args.epochs}, f, indent=2)
     print(f"done. best {best:.4f} dB (valid pixels only)")
@@ -439,6 +453,8 @@ def build_parser():
                         "fill too and is kept only as an ablation; either way the "
                         "run is selected and ranked on valid pixels.")
     p.add_argument("--phase", default="firstU", choices=["firstU", "secondU"])
+    p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
+                   help="secondU-only input extension: three zero channels or normalized TX-relative dx/dy/dz")
     p.add_argument("--grad-weight", type=float, default=0.0,
                    help="weight of valid-pair signed gradient L1 loss (normalized targets); default 0 preserves baseline")
     p.add_argument("--epochs", type=int, default=50)
@@ -485,6 +501,8 @@ if __name__ == "__main__":
         a.run_name = f"radiownet_{a.band}_{a.loss}_{a.phase}"
         if a.grad_weight:
             a.run_name += "_grad" + f"{a.grad_weight:g}".replace(".", "p")
+        if a.second_features != "none":
+            a.run_name += "_" + a.second_features
     # The second stage is useless on top of a random first U-Net, so it seeds
     # itself from the firstU run by default; "none" is the explicit opt-out.
     if a.init_from is None and a.phase == "secondU":

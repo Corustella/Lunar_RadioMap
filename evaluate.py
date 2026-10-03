@@ -49,7 +49,8 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels, ssim  
-from radiounet import RadioWNet  # noqa: E402
+from radiounet import (RadioWNet, checkpoint_features, geometry_config,
+                       load_model_state)  # noqa: E402
 from boundary import BoundaryReport, save_boundary_example
 from experiment_provenance import collect_provenance, first_stage_hash
 
@@ -118,8 +119,10 @@ def main(args):
     out_idx = 0 if phase == "firstU" else 1
 
     in_ch = 3 if band == "both" else 2
-    model = RadioWNet(inputs=in_ch, phase=phase).to(device)
-    model.load_state_dict(ck["model"])
+    second_features, feature_config = checkpoint_features(ck)
+    model = RadioWNet(inputs=in_ch, phase=phase, second_features=second_features,
+                     feature_config=feature_config).to(device)
+    load_model_state(model, ck)
     model.eval()
     print(f"loaded {args.ckpt} (epoch {ck.get('epoch')}, band {band}, phase {phase}, "
           f"val best {ck.get('best', float('nan')):.4f} dB)")
@@ -138,6 +141,8 @@ def main(args):
               flush=True)
     base = ld.LunarRadioMapDataset(args.data_root, split=args.split, band=band,
                                    return_name=True, return_mask=need_mask)
+    if feature_config is not None and geometry_config(base.meta) != feature_config:
+        raise ValueError("Evaluation metadata differs from checkpoint geometry scales")
     lo, hi = base.pl_min, base.pl_max
     scale = float(hi - lo)
     ds = ScoredSet(base, lo, hi, need_mask)
@@ -219,6 +224,7 @@ def main(args):
 
     summary = {"checkpoint": args.ckpt, "split": args.split, "band": band,
                "phase": phase, "epoch": ck.get("epoch"), "samples": len(per_sample),
+               "second_features": second_features, "feature_config": feature_config,
                "official_metric": "rmse_db_masked" if need_mask else None}
     summary.update(accs["all"].compute())
     # a band with no items (only reachable under --limit, which walks 415 first)
@@ -258,6 +264,8 @@ def main(args):
                     for i in sorted(boundary_indices & cached.keys())]
         provenance = collect_provenance(args.data_root, ld, {"evaluated": args.ckpt}, args)
         provenance["firstU_state_sha256"] = first_stage_hash(model.state_dict())
+        provenance["second_features"] = second_features
+        provenance["feature_config"] = feature_config
         provenance["forward_precision"] = "cuda autocast float16" if amp else "float32"
         provenance["predictions_and_plots"] = "Same forward pass as the main scoring loop; no panel re-inference."
         boundary.finish(provenance, summary, examples)
