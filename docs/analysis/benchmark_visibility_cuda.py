@@ -1,6 +1,6 @@
-"""Local CUDA timing of an input-only visibility prototype, not a model change.
+"""CUDA timing on the calling host of an input-only visibility prototype.
 
-Compares one real map to the FP64 NumPy reference; reports all eight cached maps.
+Compares one real map by default; --verify-all checks all eight maps and D4.
 FP32 error tolerance 0.001 m, solely an implementation check, not mesh accuracy.
 """
 
@@ -46,7 +46,7 @@ def clearance_cuda(height, tx, resolution, tx_agl, rx_agl, chunk=4096):
         return torch.cat(output).reshape(h,w)
 
 
-def analyze(source,metadata,out,repeats):
+def analyze(source,metadata,out,repeats,verify_all=False):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; no CPU fallback timing reported as GPU")
     out.mkdir(parents=True,exist_ok=False)
@@ -73,21 +73,41 @@ def analyze(source,metadata,out,repeats):
             torch.cuda.synchronize()
             times.append(time.perf_counter()-start)
         row = {"sample":path.stem,"seconds_raw":times,"seconds_mean":float(np.mean(times))}
-        if index==0:
+        if index==0 or verify_all:
             reference = clearance(height,tx,resolution,tx_agl,rx_agl)
             prediction = result.cpu().numpy()
             absolute = np.abs(reference-prediction)
             assert absolute.max()<0.001
             row.update({"fp64_reference_max_abs_error_m":float(absolute.max()),
                         "visibility_disagreements":int(((reference>1e-4)!=(prediction>1e-4)).sum())})
+            if verify_all:
+                marker=np.zeros_like(height)
+                marker[tx]=1
+                transforms=[]
+                for turns in range(4):
+                    for flip in (False,True):
+                        transformed=np.rot90(height,turns)
+                        transformed_marker=np.rot90(marker,turns)
+                        expected=np.rot90(prediction,turns)
+                        if flip:
+                            transformed=np.fliplr(transformed)
+                            transformed_marker=np.fliplr(transformed_marker)
+                            expected=np.fliplr(expected)
+                        transformed_tx=tuple(np.argwhere(transformed_marker>0)[0])
+                        actual=clearance_cuda(transformed.copy(),transformed_tx,resolution,tx_agl,rx_agl).cpu().numpy()
+                        error=float(np.max(np.abs(actual-expected)))
+                        assert error<0.001
+                        transforms.append({"rot90":turns,"flip_lr":flip,"max_abs_error_m":error})
+                row["d4_checks"]=transforms
         rows.append(row)
         print(f"CUDA {path.stem}: {row['seconds_mean']:.4f} s",flush=True)
     audit = {"maps":rows,"mean_seconds_per_map":float(np.mean([row["seconds_mean"] for row in rows])),
+             "verify_all":verify_all,
              "gpu":torch.cuda.get_device_name(0),"torch":str(torch.__version__),
              "scope":"CPU coordinate setup, host-to-GPU input transfer, FP32 ray samples/grid_sample/min and synchronize, batch1, warmup excluded. File IO, CPU output transfer, feature asinh scaling, training and model forward excluded. No AMP.",
              "source_fingerprints":[fingerprint(metadata)]+[fingerprint(path) for path in paths],
              "scripts":[fingerprint(Path(__file__)),fingerprint(Path(__file__).with_name("probe_terrain_visibility.py"))],
-             "limits":"Local laptop benchmark, not GPU server timing, full-dataset throughput or challenge runtime compliance. One real-map numerical check against a bilinear/sample reference; does not validate the original ray-tracing geometry."}
+             "limits":"Timing on the calling host identified by gpu/torch, not full-dataset throughput or challenge runtime compliance. Default compares one map; verify_all compares eight maps and their D4 transforms. These are numerical implementation checks against a bilinear/sample reference, not original ray-tracing geometry validation."}
     (out/"cuda_benchmark.json").write_text(json.dumps(audit,indent=2)+"\n",encoding="utf-8")
     print(json.dumps({key:audit[key] for key in ("mean_seconds_per_map","gpu","scope","limits")},indent=2))
 
@@ -98,7 +118,8 @@ if __name__=="__main__":
     parser.add_argument("--metadata",type=Path,required=True)
     parser.add_argument("--out",type=Path,required=True)
     parser.add_argument("--repeats",type=int,default=3)
+    parser.add_argument("--verify-all",action="store_true",help="Compare all eight maps to FP64 and verify GPU D4 equivariance")
     args=parser.parse_args()
     if args.repeats<1:
         parser.error("--repeats must be positive")
-    analyze(args.source,args.metadata,args.out,args.repeats)
+    analyze(args.source,args.metadata,args.out,args.repeats,args.verify_all)

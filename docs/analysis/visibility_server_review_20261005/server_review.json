@@ -1,0 +1,157 @@
+{
+  "status": "verified",
+  "replication_and_geometry_match": "passed",
+  "script_checks": [
+    {
+      "file": "docs/analysis/analyze_tx_xyz_replication.py",
+      "sha256": "017ddf9099f50a751eaea6ecf343781c2fb8efe5c25a822f1b1fa81f3b03caee",
+      "matches_git_ref": "97660e8"
+    },
+    {
+      "file": "docs/analysis/analyze_tx_xyz.py",
+      "sha256": "c3dd3f05c80c568b8c2002388e9486ad17e74b147aee0274151a25c08bebb971",
+      "matches_git_ref": "97660e8"
+    },
+    {
+      "file": "docs/analysis/probe_terrain_visibility.py",
+      "sha256": "4fbe00d30ccacadf55d03e2560fba459d3973b3cd9657df6a60abe474150a096",
+      "matches_git_ref": "97660e8"
+    },
+    {
+      "file": "docs/analysis/benchmark_visibility_cuda.py",
+      "sha256": "f0d74abb5717044550d89560cca240f120d5f0711c10eb9ecf2e396b62950bc2",
+      "matches_git_ref": "97660e8"
+    },
+    {
+      "file": "docs/analysis/probe_terrain_visibility.py",
+      "sha256": "4fbe00d30ccacadf55d03e2560fba459d3973b3cd9657df6a60abe474150a096",
+      "matches_git_ref": "97660e8"
+    }
+  ],
+  "source_checks": [
+    {
+      "local_file": "D:\\codes\\LunarRadiomap\\LunarRM\\metadata.json",
+      "sha256": "9d99c44eec71bff9c7d2b550d8666e979c0cbc552276e2bb2e9a561368a42d96"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\00016_00_58.npz",
+      "sha256": "99c5c91ee85ed4e7e214cef1030fcdc4da72f985cdd3d82a7e9d3c97f2ea3391"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\00536_25_58.npz",
+      "sha256": "b338cc29a08a28ab31d15cb05ed6494f7902dc23d2a9feb00cbabce35609d7d6"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\01917_32_58.npz",
+      "sha256": "cd0fe416333e983b4daa3c800b2946ed22962498cd5577a701915147854217d2"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\02739_28_58.npz",
+      "sha256": "52eb4864ba9c8a8158d9d1c572a5ddda22d4e999b25ed8d9157bc013cbcfa2c5"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\03356_46_58.npz",
+      "sha256": "1a84d0d7895fbaca560849b1c75d5bd17ee13b97943e0b632b130f047b66c280"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\04791_49_58.npz",
+      "sha256": "eddf59574e630f2a0971f1b6a139a5a1274661129057a53a02141176cd79db1c"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\05845_28_58.npz",
+      "sha256": "28e7cf502283570fb0f0d3001034c7ca96c8f435065e7060b8734aca55cbaf98"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\06794_00_58.npz",
+      "sha256": "339cae7938b735b8bded1d637790f2fc4449cff08f2abb33a3bb377f247d6bbe"
+    },
+    {
+      "local_file": "D:\\codes\\LunarRadiomap\\LunarRM\\metadata.json",
+      "sha256": "9d99c44eec71bff9c7d2b550d8666e979c0cbc552276e2bb2e9a561368a42d96"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\00016_00_58.npz",
+      "sha256": "99c5c91ee85ed4e7e214cef1030fcdc4da72f985cdd3d82a7e9d3c97f2ea3391"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\00536_25_58.npz",
+      "sha256": "b338cc29a08a28ab31d15cb05ed6494f7902dc23d2a9feb00cbabce35609d7d6"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\01917_32_58.npz",
+      "sha256": "cd0fe416333e983b4daa3c800b2946ed22962498cd5577a701915147854217d2"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\02739_28_58.npz",
+      "sha256": "52eb4864ba9c8a8158d9d1c572a5ddda22d4e999b25ed8d9157bc013cbcfa2c5"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\03356_46_58.npz",
+      "sha256": "1a84d0d7895fbaca560849b1c75d5bd17ee13b97943e0b632b130f047b66c280"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\04791_49_58.npz",
+      "sha256": "eddf59574e630f2a0971f1b6a139a5a1274661129057a53a02141176cd79db1c"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\05845_28_58.npz",
+      "sha256": "28e7cf502283570fb0f0d3001034c7ca96c8f435065e7060b8734aca55cbaf98"
+    },
+    {
+      "local_file": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\06794_00_58.npz",
+      "sha256": "339cae7938b735b8bded1d637790f2fc4449cff08f2abb33a3bb377f247d6bbe"
+    }
+  ],
+  "server_recorded_gpu": "NVIDIA GeForce RTX 5090 D v2",
+  "server_recorded_torch": "2.14.0+cu132",
+  "timing": {
+    "maps": 8,
+    "repeats_per_map": 3,
+    "mean_ms_per_map": 8.036300753398487,
+    "map_mean_range_ms": [
+      5.003246323515971,
+      12.176630552858114
+    ],
+    "raw_repeat_range_ms": [
+      3.9642490446567535,
+      12.205857783555984
+    ],
+    "local_gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "local_mean_ms": 46.38869169866666
+  },
+  "numerical_check": {
+    "real_maps_compared_to_fp64": 1,
+    "max_abs_error_m": 1.304474690044799e-05,
+    "visibility_disagreements": 0
+  },
+  "arithmetic_projections": {
+    "online_150_epoch_train_feature_hours": 8.61223564072538,
+    "one_time_train_val_feature_minutes": 3.7569706022137925,
+    "fp32_train_val_cache_gb": 7.3531392
+  },
+  "timing_scope": "CPU coordinate setup, host-to-GPU input transfer, FP32 ray samples/grid_sample/min and synchronize, batch1, warmup excluded. File IO, CPU output transfer, feature asinh scaling, training and model forward excluded. No AMP.",
+  "limits": "Recorded server timing from downloaded artifacts only, not live execution. Eight maps/three timed repetitions, one real-map GPU-vs-FP64 check. Projections reuse batch1 feature timing; exclude IO, output transfer, F scaling, model and training; not runtime estimates or full-data acceptance. No clearance training result.",
+  "incorrect_static_note_in_download": "Local laptop benchmark, not GPU server timing, full-dataset throughput or challenge runtime compliance. One real-map numerical check against a bilinear/sample reference; does not validate the original ray-tracing geometry.",
+  "source_artifacts": [
+    {
+      "path": "D:\\ssh_download\\tx_xyz_replication_audit_20261005\\replication_audit.json",
+      "bytes": 26839,
+      "sha256": "de4a0d4f29a50d41395fbcdb385f9adba6fc4921db8a8ee5bc7194433102a8eb"
+    },
+    {
+      "path": "D:\\ssh_download\\visibility_probe_20261005\\visibility_probe.json",
+      "bytes": 5112,
+      "sha256": "cf7863ee121b6df06d7badb4b6175d86d7f3fa878b8008e9cfcf54810e0dfa0e"
+    },
+    {
+      "path": "D:\\ssh_download\\visibility_cuda_20261005\\cuda_benchmark.json",
+      "bytes": 4931,
+      "sha256": "8c7b287ab294335fd1b5dd41dea979184237f7705acfc7d3dedf1cedf400379c"
+    }
+  ],
+  "analysis_script": {
+    "path": "D:\\codes\\LunarRadiomap\\lunar-radiomap-challenge\\docs\\analysis\\review_visibility_server.py",
+    "bytes": 6825,
+    "sha256": "adc2637460a4232dc0ba4218d9c60f1c934a758ac51a2f860576e652852b7a8c"
+  }
+}

@@ -1,0 +1,493 @@
+{
+  "maps": [
+    {
+      "sample": "00016_00_58",
+      "seconds_raw": [
+        0.044861799804493785,
+        0.048717099940404296,
+        0.049600600032135844
+      ],
+      "seconds_mean": 0.04772649992567798,
+      "fp64_reference_max_abs_error_m": 1.304474690044799e-05,
+      "visibility_disagreements": 0,
+      "d4_checks": [
+        {
+          "rot90": 0,
+          "flip_lr": false,
+          "max_abs_error_m": 0.0
+        },
+        {
+          "rot90": 0,
+          "flip_lr": true,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": false,
+          "max_abs_error_m": 9.059906005859375e-06
+        },
+        {
+          "rot90": 1,
+          "flip_lr": true,
+          "max_abs_error_m": 1.52587890625e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": false,
+          "max_abs_error_m": 1.52587890625e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": true,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": false,
+          "max_abs_error_m": 1.239776611328125e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": true,
+          "max_abs_error_m": 3.814697265625e-06
+        }
+      ]
+    },
+    {
+      "sample": "00536_25_58",
+      "seconds_raw": [
+        0.07719369977712631,
+        0.04820209997706115,
+        0.05355260008946061
+      ],
+      "seconds_mean": 0.05964946661454936,
+      "fp64_reference_max_abs_error_m": 2.0708621732978827e-05,
+      "visibility_disagreements": 0,
+      "d4_checks": [
+        {
+          "rot90": 0,
+          "flip_lr": false,
+          "max_abs_error_m": 0.0
+        },
+        {
+          "rot90": 0,
+          "flip_lr": true,
+          "max_abs_error_m": 2.288818359375e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": false,
+          "max_abs_error_m": 2.288818359375e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": true,
+          "max_abs_error_m": 2.288818359375e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": false,
+          "max_abs_error_m": 2.288818359375e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": true,
+          "max_abs_error_m": 3.0517578125e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": false,
+          "max_abs_error_m": 2.288818359375e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": true,
+          "max_abs_error_m": 7.62939453125e-06
+        }
+      ]
+    },
+    {
+      "sample": "01917_32_58",
+      "seconds_raw": [
+        0.05662110005505383,
+        0.06334120011888444,
+        0.05157019989565015
+      ],
+      "seconds_mean": 0.05717750002319614,
+      "fp64_reference_max_abs_error_m": 8.949774555233603e-06,
+      "visibility_disagreements": 0,
+      "d4_checks": [
+        {
+          "rot90": 0,
+          "flip_lr": false,
+          "max_abs_error_m": 0.0
+        },
+        {
+          "rot90": 0,
+          "flip_lr": true,
+          "max_abs_error_m": 1.239776611328125e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": false,
+          "max_abs_error_m": 1.239776611328125e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": true,
+          "max_abs_error_m": 1.621246337890625e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": false,
+          "max_abs_error_m": 1.621246337890625e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": true,
+          "max_abs_error_m": 9.059906005859375e-06
+        },
+        {
+          "rot90": 3,
+          "flip_lr": false,
+          "max_abs_error_m": 8.58306884765625e-06
+        },
+        {
+          "rot90": 3,
+          "flip_lr": true,
+          "max_abs_error_m": 9.5367431640625e-07
+        }
+      ]
+    },
+    {
+      "sample": "02739_28_58",
+      "seconds_raw": [
+        0.05459129996597767,
+        0.056146099930629134,
+        0.052637899992987514
+      ],
+      "seconds_mean": 0.05445843329653144,
+      "fp64_reference_max_abs_error_m": 1.2770559482788713e-05,
+      "visibility_disagreements": 0,
+      "d4_checks": [
+        {
+          "rot90": 0,
+          "flip_lr": false,
+          "max_abs_error_m": 0.0
+        },
+        {
+          "rot90": 0,
+          "flip_lr": true,
+          "max_abs_error_m": 8.58306884765625e-06
+        },
+        {
+          "rot90": 1,
+          "flip_lr": false,
+          "max_abs_error_m": 8.58306884765625e-06
+        },
+        {
+          "rot90": 1,
+          "flip_lr": true,
+          "max_abs_error_m": 1.430511474609375e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": false,
+          "max_abs_error_m": 1.430511474609375e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": true,
+          "max_abs_error_m": 1.33514404296875e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": false,
+          "max_abs_error_m": 1.239776611328125e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": true,
+          "max_abs_error_m": 9.5367431640625e-07
+        }
+      ]
+    },
+    {
+      "sample": "03356_46_58",
+      "seconds_raw": [
+        0.04843210009858012,
+        0.044507499784231186,
+        0.040274100145325065
+      ],
+      "seconds_mean": 0.044404566676045455,
+      "fp64_reference_max_abs_error_m": 1.3158596992468574e-05,
+      "visibility_disagreements": 0,
+      "d4_checks": [
+        {
+          "rot90": 0,
+          "flip_lr": false,
+          "max_abs_error_m": 0.0
+        },
+        {
+          "rot90": 0,
+          "flip_lr": true,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": false,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": true,
+          "max_abs_error_m": 1.33514404296875e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": false,
+          "max_abs_error_m": 1.33514404296875e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": true,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": false,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": true,
+          "max_abs_error_m": 3.814697265625e-06
+        }
+      ]
+    },
+    {
+      "sample": "04791_49_58",
+      "seconds_raw": [
+        0.0555353001691401,
+        0.057907799957320094,
+        0.060896600130945444
+      ],
+      "seconds_mean": 0.05811323341913521,
+      "fp64_reference_max_abs_error_m": 2.2993106714608302e-05,
+      "visibility_disagreements": 0,
+      "d4_checks": [
+        {
+          "rot90": 0,
+          "flip_lr": false,
+          "max_abs_error_m": 0.0
+        },
+        {
+          "rot90": 0,
+          "flip_lr": true,
+          "max_abs_error_m": 2.288818359375e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": false,
+          "max_abs_error_m": 2.288818359375e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": true,
+          "max_abs_error_m": 3.24249267578125e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": false,
+          "max_abs_error_m": 3.0517578125e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": true,
+          "max_abs_error_m": 3.0517578125e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": false,
+          "max_abs_error_m": 3.0517578125e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": true,
+          "max_abs_error_m": 7.62939453125e-06
+        }
+      ]
+    },
+    {
+      "sample": "05845_28_58",
+      "seconds_raw": [
+        0.057555200066417456,
+        0.05224990006536245,
+        0.05257970001548529
+      ],
+      "seconds_mean": 0.05412826671575507,
+      "fp64_reference_max_abs_error_m": 1.5422908219875353e-05,
+      "visibility_disagreements": 0,
+      "d4_checks": [
+        {
+          "rot90": 0,
+          "flip_lr": false,
+          "max_abs_error_m": 0.0
+        },
+        {
+          "rot90": 0,
+          "flip_lr": true,
+          "max_abs_error_m": 1.9073486328125e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": false,
+          "max_abs_error_m": 1.9073486328125e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": true,
+          "max_abs_error_m": 1.9073486328125e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": false,
+          "max_abs_error_m": 1.9073486328125e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": true,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": false,
+          "max_abs_error_m": 1.52587890625e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": true,
+          "max_abs_error_m": 3.814697265625e-06
+        }
+      ]
+    },
+    {
+      "sample": "06794_00_58",
+      "seconds_raw": [
+        0.048763399943709373,
+        0.0470768001396209,
+        0.04617680003866553
+      ],
+      "seconds_mean": 0.04733900004066527,
+      "fp64_reference_max_abs_error_m": 1.1797584122064109e-05,
+      "visibility_disagreements": 0,
+      "d4_checks": [
+        {
+          "rot90": 0,
+          "flip_lr": false,
+          "max_abs_error_m": 0.0
+        },
+        {
+          "rot90": 0,
+          "flip_lr": true,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": false,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 1,
+          "flip_lr": true,
+          "max_abs_error_m": 1.52587890625e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": false,
+          "max_abs_error_m": 1.52587890625e-05
+        },
+        {
+          "rot90": 2,
+          "flip_lr": true,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": false,
+          "max_abs_error_m": 1.1444091796875e-05
+        },
+        {
+          "rot90": 3,
+          "flip_lr": true,
+          "max_abs_error_m": 3.814697265625e-06
+        }
+      ]
+    }
+  ],
+  "mean_seconds_per_map": 0.05287462083894449,
+  "verify_all": true,
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "torch": "2.5.1+cu121",
+  "scope": "CPU coordinate setup, host-to-GPU input transfer, FP32 ray samples/grid_sample/min and synchronize, batch1, warmup excluded. File IO, CPU output transfer, feature asinh scaling, training and model forward excluded. No AMP.",
+  "source_fingerprints": [
+    {
+      "path": "D:\\codes\\LunarRadiomap\\LunarRM\\metadata.json",
+      "bytes": 6611,
+      "sha256": "9d99c44eec71bff9c7d2b550d8666e979c0cbc552276e2bb2e9a561368a42d96"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\00016_00_58.npz",
+      "bytes": 406679,
+      "sha256": "99c5c91ee85ed4e7e214cef1030fcdc4da72f985cdd3d82a7e9d3c97f2ea3391"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\00536_25_58.npz",
+      "bytes": 456227,
+      "sha256": "b338cc29a08a28ab31d15cb05ed6494f7902dc23d2a9feb00cbabce35609d7d6"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\01917_32_58.npz",
+      "bytes": 436983,
+      "sha256": "cd0fe416333e983b4daa3c800b2946ed22962498cd5577a701915147854217d2"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\02739_28_58.npz",
+      "bytes": 458518,
+      "sha256": "52eb4864ba9c8a8158d9d1c572a5ddda22d4e999b25ed8d9157bc013cbcfa2c5"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\03356_46_58.npz",
+      "bytes": 356176,
+      "sha256": "1a84d0d7895fbaca560849b1c75d5bd17ee13b97943e0b632b130f047b66c280"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\04791_49_58.npz",
+      "bytes": 430541,
+      "sha256": "eddf59574e630f2a0971f1b6a139a5a1274661129057a53a02141176cd79db1c"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\05845_28_58.npz",
+      "bytes": 461460,
+      "sha256": "28e7cf502283570fb0f0d3001034c7ca96c8f435065e7060b8734aca55cbaf98"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\06794_00_58.npz",
+      "bytes": 411548,
+      "sha256": "339cae7938b735b8bded1d637790f2fc4449cff08f2abb33a3bb377f247d6bbe"
+    }
+  ],
+  "scripts": [
+    {
+      "path": "D:\\codes\\LunarRadiomap\\lunar-radiomap-challenge\\docs\\analysis\\benchmark_visibility_cuda.py",
+      "bytes": 6788,
+      "sha256": "c2e6ee4fc986b6e7ac8590883fa7da2c926e19f2812cc473e0412f1dc42f5963"
+    },
+    {
+      "path": "D:\\codes\\LunarRadiomap\\lunar-radiomap-challenge\\docs\\analysis\\probe_terrain_visibility.py",
+      "bytes": 10724,
+      "sha256": "4fbe00d30ccacadf55d03e2560fba459d3973b3cd9657df6a60abe474150a096"
+    }
+  ],
+  "limits": "Timing on the calling host identified by gpu/torch, not full-dataset throughput or challenge runtime compliance. Default compares one map; verify_all compares eight maps and their D4 transforms. These are numerical implementation checks against a bilinear/sample reference, not original ray-tracing geometry validation."
+}
