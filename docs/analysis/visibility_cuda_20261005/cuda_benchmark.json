@@ -1,0 +1,142 @@
+{
+  "maps": [
+    {
+      "sample": "00016_00_58",
+      "seconds_raw": [
+        0.05597610003314912,
+        0.048728999914601445,
+        0.057803000090643764
+      ],
+      "seconds_mean": 0.05416936667946478,
+      "fp64_reference_max_abs_error_m": 1.304474690044799e-05,
+      "visibility_disagreements": 0
+    },
+    {
+      "sample": "00536_25_58",
+      "seconds_raw": [
+        0.04359060013666749,
+        0.03912760014645755,
+        0.04411230003461242
+      ],
+      "seconds_mean": 0.04227683343924582
+    },
+    {
+      "sample": "01917_32_58",
+      "seconds_raw": [
+        0.0448940999340266,
+        0.042390599846839905,
+        0.041771299904212356
+      ],
+      "seconds_mean": 0.04301866656169295
+    },
+    {
+      "sample": "02739_28_58",
+      "seconds_raw": [
+        0.045743800001218915,
+        0.043431999860331416,
+        0.04312680009752512
+      ],
+      "seconds_mean": 0.04410086665302515
+    },
+    {
+      "sample": "03356_46_58",
+      "seconds_raw": [
+        0.04167510010302067,
+        0.05005860002711415,
+        0.04512670007534325
+      ],
+      "seconds_mean": 0.045620133401826024
+    },
+    {
+      "sample": "04791_49_58",
+      "seconds_raw": [
+        0.04857129999436438,
+        0.05732700019143522,
+        0.04750430001877248
+      ],
+      "seconds_mean": 0.051134200068190694
+    },
+    {
+      "sample": "05845_28_58",
+      "seconds_raw": [
+        0.042334800120443106,
+        0.04009309993125498,
+        0.04182180017232895
+      ],
+      "seconds_mean": 0.041416566741342344
+    },
+    {
+      "sample": "06794_00_58",
+      "seconds_raw": [
+        0.04751990013755858,
+        0.04768550000153482,
+        0.052913299994543195
+      ],
+      "seconds_mean": 0.04937290004454553
+    }
+  ],
+  "mean_seconds_per_map": 0.04638869169866666,
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "torch": "2.5.1+cu121",
+  "scope": "CPU coordinate setup, host-to-GPU input transfer, FP32 ray samples/grid_sample/min and synchronize, batch1, warmup excluded. File IO, CPU output transfer, feature asinh scaling, training and model forward excluded. No AMP.",
+  "source_fingerprints": [
+    {
+      "path": "D:\\codes\\LunarRadiomap\\LunarRM\\metadata.json",
+      "bytes": 6611,
+      "sha256": "9d99c44eec71bff9c7d2b550d8666e979c0cbc552276e2bb2e9a561368a42d96"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\00016_00_58.npz",
+      "bytes": 406679,
+      "sha256": "99c5c91ee85ed4e7e214cef1030fcdc4da72f985cdd3d82a7e9d3c97f2ea3391"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\00536_25_58.npz",
+      "bytes": 456227,
+      "sha256": "b338cc29a08a28ab31d15cb05ed6494f7902dc23d2a9feb00cbabce35609d7d6"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\01917_32_58.npz",
+      "bytes": 436983,
+      "sha256": "cd0fe416333e983b4daa3c800b2946ed22962498cd5577a701915147854217d2"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\02739_28_58.npz",
+      "bytes": 458518,
+      "sha256": "52eb4864ba9c8a8158d9d1c572a5ddda22d4e999b25ed8d9157bc013cbcfa2c5"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\03356_46_58.npz",
+      "bytes": 356176,
+      "sha256": "1a84d0d7895fbaca560849b1c75d5bd17ee13b97943e0b632b130f047b66c280"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\04791_49_58.npz",
+      "bytes": 430541,
+      "sha256": "eddf59574e630f2a0971f1b6a139a5a1274661129057a53a02141176cd79db1c"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\05845_28_58.npz",
+      "bytes": 461460,
+      "sha256": "28e7cf502283570fb0f0d3001034c7ca96c8f435065e7060b8734aca55cbaf98"
+    },
+    {
+      "path": "D:\\ssh_download\\tx_xyz_v1_seed0\\seed0_zeros\\boundary\\06794_00_58.npz",
+      "bytes": 411548,
+      "sha256": "339cae7938b735b8bded1d637790f2fc4449cff08f2abb33a3bb377f247d6bbe"
+    }
+  ],
+  "scripts": [
+    {
+      "path": "D:\\codes\\LunarRadiomap\\lunar-radiomap-challenge\\docs\\analysis\\benchmark_visibility_cuda.py",
+      "bytes": 5400,
+      "sha256": "f0d74abb5717044550d89560cca240f120d5f0711c10eb9ecf2e396b62950bc2"
+    },
+    {
+      "path": "D:\\codes\\LunarRadiomap\\lunar-radiomap-challenge\\docs\\analysis\\probe_terrain_visibility.py",
+      "bytes": 10724,
+      "sha256": "4fbe00d30ccacadf55d03e2560fba459d3973b3cd9657df6a60abe474150a096"
+    }
+  ],
+  "limits": "Local laptop benchmark, not GPU server timing, full-dataset throughput or challenge runtime compliance. One real-map numerical check against a bilinear/sample reference; does not validate the original ray-tracing geometry."
+}

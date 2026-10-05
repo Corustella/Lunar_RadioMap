@@ -20,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from experiment_provenance import fingerprint, first_stage_hash
 from radiounet import checkpoint_features
 
-RUNS = ("baseline_reference", "seed0_zeros", "seed0_tx_xyz")
 FEATURES = ("none", "zeros", "tx_xyz")
 WEIGHTS = ("Wlayer00.0.weight", "Wconv_up00.0.weight", "Wconv_up000.0.weight")
 
@@ -51,7 +50,9 @@ def main(source, data, out, bootstrap_repeats=20000):
     torch.set_num_threads(2)
     manifest = read_json(source / "manifest.json")
     assert manifest["status"] == "complete" and not manifest["smoke_only"]
-    assert manifest["seed"] == 0 and manifest["grad_weight"] == 0
+    seed = manifest["seed"]
+    assert isinstance(seed, int) and seed >= 0 and manifest["grad_weight"] == 0
+    run_names = ("baseline_reference", f"seed{seed}_zeros", f"seed{seed}_tx_xyz")
     assert all(item["status"] == "complete" for item in manifest["commands"])
     index = read_csv(data / "val_index.csv")
     ids = [row["sample_id"] for row in index]
@@ -64,7 +65,7 @@ def main(source, data, out, bootstrap_repeats=20000):
     runs, cached, source_hashes, code_checks = {}, {}, [], []
     run_rows, example_rows, profile_rows, weight_rows = [], [], [], []
     common_eval, common_train = None, None
-    for name, mode in zip(RUNS, FEATURES):
+    for name, mode in zip(run_names, FEATURES):
         directory = source / name
         report = read_json(directory / "boundary/summary.json")
         val = read_json(directory / "val.json")
@@ -102,7 +103,7 @@ def main(source, data, out, bootstrap_repeats=20000):
                        "threshold_atol_db", "definitions")
         if runs:
             for key in definitions:
-                assert report[key] == runs[RUNS[0]]["report"][key]
+                assert report[key] == runs[run_names[0]]["report"][key]
         totals = {(r["output"], r["region"]): np.zeros(3) for r in report["regions"]}
         sample = {r["region"]: np.zeros((2330, 3)) for r in report["regions"] if r["output"] == "secondU"}
         seen = set()
@@ -129,7 +130,7 @@ def main(source, data, out, bootstrap_repeats=20000):
             target = "all_valid" if not prefix else prefix[:-1]
             np.testing.assert_allclose(sample[near] + sample[away], sample[target], rtol=1e-10, atol=1e-5)
         if runs:
-            original = runs[RUNS[0]]
+            original = runs[run_names[0]]
             for key in totals:
                 if key[0] == "firstU":
                     np.testing.assert_array_equal(totals[key], original["totals"][key])
@@ -156,7 +157,7 @@ def main(source, data, out, bootstrap_repeats=20000):
                 assert first_stage_hash(ck["model"]) == manifest["firstU_state_sha256"]
                 assert checkpoint_features(ck) == (mode, manifest["feature_config"])
                 assert ck["args"] == train_prov["args"]
-                assert ck["args"]["seed"] == 0 and ck["args"]["grad_weight"] == 0 and ck["args"]["resume"] is None
+                assert ck["args"]["seed"] == seed and ck["args"]["grad_weight"] == 0 and ck["args"]["resume"] is None
                 for key, value in manifest["baseline_settings"].items():
                     assert ck["args"][key] == value, key
                 if label == "best":
@@ -221,7 +222,7 @@ def main(source, data, out, bootstrap_repeats=20000):
                 source_hashes.append(fingerprint(path))
         print(f"Verified {name}: {audit['rmse_db_masked']:.9f} dB, epoch {audit['best_epoch']}", flush=True)
 
-    control, candidate, baseline = (runs[name] for name in ("seed0_zeros", "seed0_tx_xyz", "baseline_reference"))
+    control, candidate, baseline = (runs[name] for name in (*run_names[1:], run_names[0]))
     comparison = read_csv(source / "comparison.csv")
     assert len(comparison) == 3
     for row in comparison:
@@ -273,7 +274,7 @@ def main(source, data, out, bootstrap_repeats=20000):
                    "control_train_mse": float(x["train_loss"]), "candidate_train_mse": float(y["train_loss"])}
                   for i,(x,y) in enumerate(zip(control["history"],candidate["history"]))]
     crossings = {}
-    for name in RUNS:
+    for name in run_names:
         rows = [r for r in profile_rows if r["run"] == name]
         crossings[name] = {}
         for key in ("target_db", "firstU_db", "prediction_db"):
@@ -307,6 +308,7 @@ def main(source, data, out, bootstrap_repeats=20000):
         write_csv(out/filename,rows)
     (out/"audit.json").write_text(json.dumps(audit,indent=2)+"\n",encoding="utf-8")
     print(json.dumps({"influence":influence,"terrain_bootstrap":bootstrap_note,"groups":group_rows},indent=2))
+    return audit
 
 
 if __name__ == "__main__":
