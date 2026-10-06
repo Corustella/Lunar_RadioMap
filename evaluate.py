@@ -49,7 +49,7 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels, ssim  
-from radiounet import (RadioWNet, checkpoint_features, geometry_config,
+from radiounet import (RadioWNet, checkpoint_features, feature_config_for_mode,
                        load_model_state)  # noqa: E402
 from boundary import BoundaryReport, save_boundary_example
 from experiment_provenance import collect_provenance, first_stage_hash
@@ -141,8 +141,14 @@ def main(args):
               flush=True)
     base = ld.LunarRadioMapDataset(args.data_root, split=args.split, band=band,
                                    return_name=True, return_mask=need_mask)
-    if feature_config is not None and geometry_config(base.meta) != feature_config:
+    if feature_config_for_mode(base.meta, second_features) != feature_config:
         raise ValueError("Evaluation metadata differs from checkpoint geometry scales")
+    if second_features == "los":
+        from los_features import LOSDataset
+        cache_root = args.los_cache or saved.get("los_cache")
+        if not cache_root:
+            raise ValueError("LOS evaluation requires --los-cache")
+        base = LOSDataset(base, cache_root, feature_config)
     lo, hi = base.pl_min, base.pl_max
     scale = float(hi - lo)
     ds = ScoredSet(base, lo, hi, need_mask)
@@ -286,6 +292,7 @@ def build_parser():
         description="Score a RadioWNet checkpoint on the val or test split.")
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data-root", default="LunarRM")
+    p.add_argument("--los-cache", default=None, help="LOS cache; defaults to the checkpoint's cache path")
     p.add_argument("--split", default="val", choices=["val", "test"])
     p.add_argument("--band", default=None, choices=["415", "58", "both"],
                    help="defaults to the band the checkpoint was trained on")

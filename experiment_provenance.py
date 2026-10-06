@@ -42,7 +42,16 @@ def collect_provenance(data_root, loader_module, checkpoints, args):
     code = [root / name for name in (
         "train.py", "evaluate.py", "metrics.py", "boundary.py", "radiounet.py",
         "lunar_dataset.py", "RadioUNet/modules.py", "experiment_provenance.py",
-        "ablate_boundary.py", "ablate_coordinates.py")]
+        "ablate_boundary.py", "ablate_coordinates.py", "los_features.py",
+        "build_los_cache.py", "run_los.py")]
+
+    hashing = not getattr(args, "no_fingerprints", False)
+
+    def record(path):
+        if hashing:
+            return fingerprint(path)
+        path = Path(path).resolve()
+        return {"path": str(path), "bytes": path.stat().st_size}
 
     def git(*command):
         try:
@@ -62,8 +71,9 @@ def collect_provenance(data_root, loader_module, checkpoints, args):
                         "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None},
         "git_commit": git("rev-parse", "HEAD"),
         "git_status": git("status", "--short"),
-        "code": [fingerprint(p) for p in code if p.exists()],
-        "data_metadata_and_actual_loader": [fingerprint(p) for p in files],
-        "checkpoints": {key: fingerprint(path) for key, path in checkpoints.items()},
-        "data_array_hashes": "Not computed: large arrays are identified by path/version supplied by the user; metadata/index hashes alone do not prove array identity.",
+        "fingerprints_enabled": hashing,
+        "code": [record(p) for p in code if p.exists()],
+        "data_metadata_and_actual_loader": [record(p) for p in files],
+        "checkpoints": {key: record(path) for key, path in checkpoints.items()},
+        "data_array_hashes": "Not computed; data version is identified by the supplied dataset path.",
     }

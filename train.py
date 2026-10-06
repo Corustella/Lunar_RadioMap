@@ -78,7 +78,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels 
 from radiounet import (RadioWNet, trains_in_phase, SECOND_FEATURES,
-                       geometry_config, load_model_state)
+                       feature_config_for_mode, load_model_state)
 from boundary import masked_gradient_loss
 from experiment_provenance import collect_provenance, first_stage_hash
 
@@ -126,9 +126,18 @@ def resolve_init_from(args):
 
 def make_loaders(ld, args):
     common = dict(root=args.data_root, band=args.band, return_mask=True)
-    train_ds = ld.LunarRadioMapDataset(split="train", augment=not args.no_augment,
+    use_los = args.second_features == "los"
+    train_ds = ld.LunarRadioMapDataset(split="train", augment=not args.no_augment and not use_los,
                                        **common)
     val_ds = ld.LunarRadioMapDataset(split="val", augment=False, **common)
+    if use_los:
+        from los_features import LOSDataset
+        if not args.los_cache:
+            raise ValueError("--second-features los requires --los-cache")
+        config = feature_config_for_mode(train_ds.meta, "los")
+        train_ds = LOSDataset(train_ds, args.los_cache, config,
+                              augment=not args.no_augment, augmentation=ld._augment)
+        val_ds = LOSDataset(val_ds, args.los_cache, config)
     print(f"samples: {len(train_ds)} train / {len(val_ds)} val")
 
     dl = dict(batch_size=args.batch_size, num_workers=args.num_workers,
@@ -228,7 +237,7 @@ def main(args):
     in_ch = 3 if args.band == "both" else 2
 
     out_idx = 0 if args.phase == "firstU" else 1
-    feature_config = geometry_config(ds.meta) if args.second_features != "none" else None
+    feature_config = feature_config_for_mode(ds.meta, args.second_features)
     model = RadioWNet(inputs=in_ch, phase=args.phase,
                      second_features=args.second_features, feature_config=feature_config).to(device)
     
@@ -315,7 +324,8 @@ def main(args):
               "<firstU checkpoint>.")
 
     provenance = collect_provenance(args.data_root, ld, checkpoint_sources, args)
-    provenance["firstU_state_sha256"] = first_stage_hash(model.state_dict())
+    if not args.no_fingerprints:
+        provenance["firstU_state_sha256"] = first_stage_hash(model.state_dict())
     provenance["second_features"] = args.second_features
     provenance["feature_config"] = feature_config
     provenance["weight_loading"] = weight_loading
@@ -348,9 +358,13 @@ def main(args):
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=args.amp and device.type == "cuda"):
                 pred = model(x)[out_idx]
-                loss, mse_loss, gradient_loss = compute_loss(
-                    pred.float(), y.float(), m.float(), args.loss,
-                    args.grad_weight, return_components=True)
+                if args.no_gradient_diagnostics and not args.grad_weight:
+                    loss = compute_loss(pred.float(), y.float(), m.float(), args.loss)
+                    mse_loss, gradient_loss = loss, loss.detach() * 0.0
+                else:
+                    loss, mse_loss, gradient_loss = compute_loss(
+                        pred.float(), y.float(), m.float(), args.loss,
+                        args.grad_weight, return_components=True)
             scaler.scale(loss).backward()
             if args.clip:
                 scaler.unscale_(opt)
@@ -389,7 +403,8 @@ def main(args):
                **{k: v for k, v in metrics.items()}}
         # Separate CSV keeps legacy history headers resumable without rewriting.
         component_row = {"epoch": epoch, "train_mse": running_mse / max(seen, 1),
-                         "train_gradient": running_gradient / max(seen, 1),
+                         "train_gradient": (None if args.no_gradient_diagnostics and not args.grad_weight
+                                            else running_gradient / max(seen, 1)),
                          "grad_weight": args.grad_weight, "train_total": train_loss}
         new_components = not os.path.exists(loss_path) or epoch == 0
         with open(loss_path, "w" if new_components else "a", newline="") as handle:
@@ -454,7 +469,12 @@ def build_parser():
                         "run is selected and ranked on valid pixels.")
     p.add_argument("--phase", default="firstU", choices=["firstU", "secondU"])
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
-                   help="secondU-only input extension: three zero channels or normalized TX-relative dx/dy/dz")
+                   help="secondU inputs: zeros, TX-relative dx/dy/dz, or cached LOS clearance [F,0,0]")
+    p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
+    p.add_argument("--no-fingerprints", action="store_true",
+                   help="record paths, settings and versions without computing SHA256 hashes")
+    p.add_argument("--no-gradient-diagnostics", action="store_true",
+                   help="skip diagnostic gradient loss when grad-weight=0")
     p.add_argument("--grad-weight", type=float, default=0.0,
                    help="weight of valid-pair signed gradient L1 loss (normalized targets); default 0 preserves baseline")
     p.add_argument("--epochs", type=int, default=50)

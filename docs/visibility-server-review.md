@@ -1,8 +1,12 @@
 # 净空诊断服务器产物审查与实现决策
 
+**2026-10-06 执行更新：**用户已要求直接做完整 LOS 主实验，相关训练实现和命令见[当前运行说明](los-main-experiment.md)。本报告保留历史结果；其中待确认、前置验收、zeros 配对和重复核验不再是进入训练的前提。
+
 日期：2026-10-05。读取用户下载的三个目录：`D:/ssh_download/tx_xyz_replication_audit_20261005`、`visibility_probe_20261005`、`visibility_cuda_20261005`。本轮未连接服务器；服务器信息及时间均来自下载记录。
 
 **判断：服务器重复审查通过，净空构造的数值和成本支持进入受控训练的实现阶段。推荐一次性缓存连续净空F，训练只向secondU提供[F,0,0]，与同形状zeros比较；正式模型改动待用户确认。** 此次产物不是净空训练成绩，不能判断它已经改善RMSE。xyz三对seed的不稳定结论保持。
+
+**服务器扩展验收更新：**用户随后下载`D:/ssh_download/visibility_cuda_fullcheck_20261005`，八图GPU/FP64与64项D4检查均通过，数值与本地一致，最大差分别为2.2993e−5m、3.2425e−5m，可见性符号差异为0。该轮八图平均计时8.271ms；原型的两环境数值验收已结束，下一步应落实缓存与模型输入消融，不继续重复同类诊断。[扩展验收核验](analysis/visibility_server_review_20261005/server_fullcheck.json)
 
 ## 1. 下载结果核验
 
@@ -40,7 +44,7 @@
 - 每图八种D4变换共64项GPU等变检查，最大差**3.2425e−5m**；均低于预先声明的0.001m实现容限。
 - 原平地、山脊、高度平移和D4合成检查已通过；实际输入/目标/有效性mask的来源一致。
 
-这些是**近似算法的数值实现检查**，不验证原Sionna地形mesh、重心RX和网格插值是否完全相同，也不构成净空表征的预测效果验证。服务器PyTorch版本不同，正式跑训练前建议在那里使用新flag确认同一检查；不将本地GPU检查冒称服务器验收。
+这些是**近似算法的数值实现检查**，不验证原Sionna地形mesh、重心RX和网格插值是否完全相同，也不构成净空表征的预测效果验证。随后下载的5090D v2/PyTorch2.14服务器完整检查已通过，八图与64项D4数值均和本地参考吻合；来源metadata/缓存哈希吻合，两个脚本内容匹配提交62062d0的Git blob。计时由24条原始重复重新核算，为8.271ms/图，仍不包含完整IO或模型训练。以上均来自记录，没有实时访问服务器。
 
 [八图/64变换验收](analysis/visibility_cuda_fullcheck_20261005/cuda_benchmark.json)
 
@@ -52,7 +56,7 @@
 
 1. 从测试可用height/TX计算F，固定TX3m/RX1m、双线性插值、≤0.5m嵌套采样和FP32计算。F定义不变，保持`asinh(C/1m)/asinh(496m/1m)`；不根据这次val图调参。
 2. 在GPU上一次性构造train/val缓存并写入新的缓存目录，原始数据和优先loader保持。按官方index寻址，增强时同步旋转/翻转scalar F；缓存缺失、版本或索引不匹配时报错。
-3. two groups均从原`seed0_grad0`完整baseline初始化，固定同一firstU，grad-weight=0，150epochs和原优化设置。secondU输入为zeros或[F,0,0]，保持已有三列扩展形状、零填充初始化。不从xyz best续训。
+3. 两组均从原`seed0_grad0`完整baseline初始化，固定同一firstU，grad-weight=0，150epochs和原优化设置。secondU输入为zeros或[F,0,0]，保持已有三列扩展形状、零填充初始化。不从xyz best续训。
 4. 先做迁移/初始输出/梯度/冻结/缓存增强/checkpoint往返和短程smoke验收，再输出seed0正式配对运行命令。记录一次性缓存成本、IO、全部训练和评估时间。
 5. 整体masked RMSE与主边界SSE都下降才触发seed1/2复核；报告terrain集中度、multi/single及近缺测代价，不把单图轮廓改善替代主指标。
 
@@ -60,24 +64,24 @@
 
 ## 5. 本轮提交与服务器检查命令
 
-本轮修改benchmark的说明和可选数值检查，新增本报告、下载产物审查脚本及核验结果，更新文档索引/提案状态。尚未commit/push；用户已有.gitignore修改不加入本次提交。
+上一版新增benchmark完整检查；本次仅增加完整检查记录的只读核验脚本与结果，并更新报告/提案状态，模型与训练代码未变。尚未commit/push；用户已有.gitignore修改不加入本次提交。
 
 ```powershell
 cd D:\codes\LunarRadiomap\lunar-radiomap-challenge
-git add -f docs/README.md docs/next-step-visibility-proposal.md docs/visibility-server-review.md docs/analysis/benchmark_visibility_cuda.py docs/analysis/review_visibility_server.py docs/analysis/visibility_server_review_20261005 docs/analysis/visibility_cuda_fullcheck_20261005
+git add -f docs/README.md docs/next-step-visibility-proposal.md docs/visibility-server-review.md docs/analysis/verify_visibility_fullcheck.py docs/analysis/visibility_server_review_20261005/server_fullcheck.json
 git diff --cached --stat
-git commit -m "Verify downloaded visibility diagnostics and GPU numerical checks"
+git commit -m "Confirm server visibility fullcheck acceptance"
 git push origin main
 ```
 
-服务器在已确认Conda环境中同步，使用新目录运行扩展验收，通常约一两分钟，实际以机器为准：
+服务器在已确认Conda环境中同步。下面的归档核验命令仅读取已有JSON/缓存，不重新运行GPU，通常数秒；输出文件必须不存在：
 
 ```bash
 cd ~/liuanda/lunar-radiomap-challenge
 git status
 git switch main
 git pull --ff-only
-python docs/analysis/benchmark_visibility_cuda.py --source runs --metadata ~/liuanda/LunarRM/metadata.json --out results/visibility_cuda_fullcheck_20261005 --verify-all
+python docs/analysis/verify_visibility_fullcheck.py --artifact results/visibility_cuda_fullcheck_20261005/cuda_benchmark.json --cache-root runs --data-root ~/liuanda/LunarRM --out results/visibility_fullcheck_verified_20261005.json
 ```
 
-此命令只作现有原型验收，正式净空训练仍需下一版实施。无需重复已完成的xyz训练或全部CSV审查。`review_visibility_server.py`用于本地下载目录重算，要求审查目录及原始runs同处一个source根目录；不直接将服务器results目录当作满足该结构的source。
+归档核验是可选的，无需再下载其输出作为进入下一版的前提。原型数值检查已通过，下一步是按第4节实施净空训练消融，等待对模型输入/缓存读取变更的明确确认；不是再重复xyz训练或净空原型计时。`review_visibility_server.py`用于本地下载目录重算，要求审查目录及原始runs同处一个source根目录；不直接将服务器results目录当作满足该结构的source。

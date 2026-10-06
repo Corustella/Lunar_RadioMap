@@ -33,7 +33,7 @@ clone or a stripped archive. Re-clone, or restore it from
 https://github.com/RonLevie/RadioUNet"""
 
 _cached = None
-SECOND_FEATURES = ("none", "zeros", "tx_xyz")
+SECOND_FEATURES = ("none", "zeros", "tx_xyz", "los")
 _EXPANDED_WEIGHTS = ("Wlayer00.0.weight", "Wconv_up00.0.weight",
                      "Wconv_up000.0.weight")
 
@@ -56,6 +56,16 @@ def geometry_config(meta):
     return config
 
 
+def feature_config_for_mode(meta, mode):
+    if mode == "none":
+        return None
+    config = geometry_config(meta)
+    if mode == "los":
+        from los_features import los_feature_config
+        config = los_feature_config(config)
+    return config
+
+
 def checkpoint_features(checkpoint):
     """Legacy checkpoints use no features; expanded checkpoints must save scales."""
     mode = checkpoint.get("args", {}).get("second_features", "none")
@@ -65,7 +75,7 @@ def checkpoint_features(checkpoint):
     if mode != "none":
         if config is None or config.get("version") != 1:
             raise ValueError("Geometry checkpoint lacks a supported feature_config")
-        expected = geometry_config({**config, "simulation": config})
+        expected = feature_config_for_mode({**config, "simulation": config}, mode)
         if expected != config:
             raise ValueError("Invalid checkpoint feature_config")
     elif config is not None:
@@ -108,12 +118,19 @@ def _append_geometry(model, args):
     import torch
 
     (input,) = args
-    if input.shape[1] != model.inputs:
-        raise ValueError(f"Expected {model.inputs} base channels, got {input.shape[1]}")
+    expected = model.inputs + int(model.second_features == "los")
+    if input.shape[1] != expected:
+        raise ValueError(f"Expected {expected} input channels, got {input.shape[1]}")
     with torch.no_grad():
-        features = tx_geometry(input, model.feature_config)
-        if model.second_features == "zeros":
-            features = torch.zeros_like(features)
+        if model.second_features == "los":
+            feature = input[:, model.inputs:model.inputs + 1]
+            features = torch.cat((feature, torch.zeros_like(feature),
+                                  torch.zeros_like(feature)), dim=1)
+            input = input[:, :model.inputs]
+        else:
+            features = tx_geometry(input, model.feature_config)
+            if model.second_features == "zeros":
+                features = torch.zeros_like(features)
     return (torch.cat((input, features), dim=1),)
 
 
