@@ -15,6 +15,8 @@ paper/
 # data -- downloaded from Kaggle, never committed
 LunarRM/
 data/
+docs/
+local_experiments/
 *.npy
 
 # submissions

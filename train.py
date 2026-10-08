@@ -62,7 +62,6 @@ Examples
 import argparse
 import csv
 import json
-import math
 import os
 import random
 import sys
@@ -77,10 +76,9 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels 
-from radiounet import (RadioWNet, trains_in_phase, SECOND_FEATURES,
+from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
                        feature_config_for_mode, load_model_state)
-from boundary import masked_gradient_loss
-from experiment_provenance import collect_provenance, first_stage_hash
+from experiment_provenance import collect_provenance
 
 
 def load_dataset_module(data_root):
@@ -109,9 +107,6 @@ def resolve_init_from(args):
     if args.init_from != "auto":
         return args.init_from
     run_name = args.run_name
-    feature_suffix = "_" + args.second_features
-    if args.second_features != "none" and run_name.endswith(feature_suffix):
-        run_name = run_name[:-len(feature_suffix)]
     stem = (run_name.replace("secondU", "firstU") if "secondU" in run_name
             else f"radiownet_{args.band}_{args.loss}_firstU")
     for suffix in ("_best.pt", "_last.pt"):
@@ -133,7 +128,7 @@ def make_loaders(ld, args):
     if use_los:
         from los_features import LOSDataset
         if not args.los_cache:
-            raise ValueError("--second-features los requires --los-cache")
+            raise ValueError("LOS inputs require --los-cache")
         config = feature_config_for_mode(train_ds.meta, "los")
         train_ds = LOSDataset(train_ds, args.los_cache, config,
                               augment=not args.no_augment, augmentation=ld._augment)
@@ -153,27 +148,12 @@ def unpack(batch, device):
             m.to(device, non_blocking=True))
 
 
-def compute_loss(pred, y, m, kind, grad_weight=0.0, return_components=False):
+def compute_loss(pred, y, m, kind):
     if kind == "masked":
         se = (pred - y) ** 2 * m
         denom = m.sum()
-        mse = se.sum() / denom if denom > 0 else se.sum() * 0.0
-    else:
-        mse = nn.functional.mse_loss(pred, y)
-    if grad_weight or return_components:
-        gradient = masked_gradient_loss(pred if grad_weight else pred.detach(), y, m)
-    else:
-        gradient = mse.detach() * 0.0
-    # Preserve the original value AND backward path exactly when lambda=0.
-    total = mse + grad_weight * gradient if grad_weight else mse
-    return (total, mse, gradient) if return_components else total
-
-
-def check_resume_grad_weight(checkpoint, grad_weight):
-    previous = float(checkpoint.get("args", {}).get("grad_weight", 0.0))
-    if previous != grad_weight:
-        raise ValueError(f"Cannot resume with --grad-weight {grad_weight}; checkpoint used "
-                         f"{previous}. Use --init-from and a new run for a different loss.")
+        return se.sum() / denom if denom > 0 else se.sum() * 0.0
+    return nn.functional.mse_loss(pred, y)
 
 
 @torch.no_grad()
@@ -219,12 +199,10 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
 
 
 def main(args):
-    if not math.isfinite(args.grad_weight) or args.grad_weight < 0:
-        raise ValueError("--grad-weight must be finite and non-negative")
-    if args.grad_weight and args.loss != "masked":
-        raise ValueError("--grad-weight requires --loss masked")
-    if args.second_features != "none" and args.phase != "secondU":
-        raise ValueError("--second-features trains only secondU; firstU must stay fixed")
+    if args.first_features == "los" and args.second_features != "los":
+        raise ValueError("--first-features los requires --second-features los")
+    if args.second_features == "los" and args.first_features == "none" and args.phase == "firstU":
+        raise ValueError("LOS firstU training requires --first-features los")
     ld = load_dataset_module(args.data_root)
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -239,7 +217,8 @@ def main(args):
     out_idx = 0 if args.phase == "firstU" else 1
     feature_config = feature_config_for_mode(ds.meta, args.second_features)
     model = RadioWNet(inputs=in_ch, phase=args.phase,
-                     second_features=args.second_features, feature_config=feature_config).to(device)
+                     second_features=args.second_features, feature_config=feature_config,
+                     first_features=args.first_features).to(device)
     
     for pname, prm in model.named_parameters():
         prm.requires_grad_(trains_in_phase(pname, args.phase))
@@ -261,7 +240,6 @@ def main(args):
     ckpt_last = os.path.join(args.out, f"{args.run_name}_last.pt")
     ckpt_best = os.path.join(args.out, f"{args.run_name}_best.pt")
     hist_path = os.path.join(args.out, f"{args.run_name}_history.csv")
-    loss_path = os.path.join(args.out, f"{args.run_name}_loss_components.csv")
 
     start_epoch = 0
     best = float("inf")
@@ -271,8 +249,13 @@ def main(args):
     if args.resume:
         path = ckpt_last if args.resume == "auto" else args.resume
         if os.path.exists(path):
-            ck = torch.load(path, map_location=device)
-            check_resume_grad_weight(ck, args.grad_weight)
+            ck = torch.load(path, map_location=device, weights_only=False)
+            previous = ck.get("args", {})
+            if (float(previous.get("grad_weight", 0.0)) != 0.0 or
+                    previous.get("loss", args.loss) != args.loss or
+                    previous.get("phase", args.phase) != args.phase or
+                    previous.get("band", args.band) != args.band):
+                raise ValueError("Resume requires the same loss, phase and band; use --init-from for a new stage")
             checkpoint_sources["resume"] = path
             weight_loading = load_model_state(model, ck)
             opt.load_state_dict(ck["opt"])
@@ -308,7 +291,7 @@ def main(args):
 
     if args.init_from and not resumed:
         path = resolve_init_from(args)
-        ck = torch.load(path, map_location=device)
+        ck = torch.load(path, map_location=device, weights_only=False)
         checkpoint_sources["init_from"] = path
         prev = ck.get("args", {})
         if prev.get("band", args.band) != args.band:
@@ -324,8 +307,7 @@ def main(args):
               "<firstU checkpoint>.")
 
     provenance = collect_provenance(args.data_root, ld, checkpoint_sources, args)
-    if not args.no_fingerprints:
-        provenance["firstU_state_sha256"] = first_stage_hash(model.state_dict())
+    provenance["first_features"] = args.first_features
     provenance["second_features"] = args.second_features
     provenance["feature_config"] = feature_config
     provenance["weight_loading"] = weight_loading
@@ -345,26 +327,19 @@ def main(args):
 
     print(f"training {args.run_name}: band={args.band} loss={args.loss} "
           f"phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
-          f"grad_weight={args.grad_weight:g} second_features={args.second_features}")
+          f"first_features={args.first_features} second_features={args.second_features}")
 
     hist_cols = None
     for epoch in range(start_epoch, args.epochs):
         model.train()
         t0 = time.time()
         running, seen = 0.0, 0
-        running_mse, running_gradient = 0.0, 0.0
         for i, batch in enumerate(train_loader):
             x, y, m = unpack(batch, device)
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=args.amp and device.type == "cuda"):
                 pred = model(x)[out_idx]
-                if args.no_gradient_diagnostics and not args.grad_weight:
-                    loss = compute_loss(pred.float(), y.float(), m.float(), args.loss)
-                    mse_loss, gradient_loss = loss, loss.detach() * 0.0
-                else:
-                    loss, mse_loss, gradient_loss = compute_loss(
-                        pred.float(), y.float(), m.float(), args.loss,
-                        args.grad_weight, return_components=True)
+                loss = compute_loss(pred.float(), y, m, args.loss)
             scaler.scale(loss).backward()
             if args.clip:
                 scaler.unscale_(opt)
@@ -373,8 +348,6 @@ def main(args):
             scaler.update()
 
             running += loss.item() * x.size(0)
-            running_mse += mse_loss.item() * x.size(0)
-            running_gradient += gradient_loss.item() * x.size(0)
             seen += x.size(0)
             if args.log_every and i % args.log_every == 0:
                 print(f"  ep{epoch} [{i}/{len(train_loader)}] loss {loss.item():.6f}",
@@ -401,17 +374,6 @@ def main(args):
         row = {"epoch": epoch, "train_loss": train_loss, "lr": epoch_lr,
                "epoch_seconds": round(dt, 1),
                **{k: v for k, v in metrics.items()}}
-        # Separate CSV keeps legacy history headers resumable without rewriting.
-        component_row = {"epoch": epoch, "train_mse": running_mse / max(seen, 1),
-                         "train_gradient": (None if args.no_gradient_diagnostics and not args.grad_weight
-                                            else running_gradient / max(seen, 1)),
-                         "grad_weight": args.grad_weight, "train_total": train_loss}
-        new_components = not os.path.exists(loss_path) or epoch == 0
-        with open(loss_path, "w" if new_components else "a", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(component_row))
-            if new_components:
-                writer.writeheader()
-            writer.writerow(component_row)
         if hist_cols is None:
             hist_cols = list(row)
             new_file = not os.path.exists(hist_path) or start_epoch == 0
@@ -447,8 +409,8 @@ def main(args):
 
     with open(os.path.join(args.out, f"{args.run_name}_summary.json"), "w") as f:
         json.dump({"run": args.run_name, "band": args.band, "loss": args.loss,
-                   "grad_weight": args.grad_weight,
                    "phase": args.phase, "init_from": args.init_from,
+                   "first_features": args.first_features,
                    "second_features": args.second_features, "feature_config": feature_config,
                    "selection_metric": "val/rmse_db_masked",
                    "best": best, "epochs": args.epochs}, f, indent=2)
@@ -468,15 +430,11 @@ def build_parser():
                         "fill too and is kept only as an ablation; either way the "
                         "run is selected and ranked on valid pixels.")
     p.add_argument("--phase", default="firstU", choices=["firstU", "secondU"])
+    p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,
+                   help="append cached LOS clearance F to firstU; requires --second-features los")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
-                   help="secondU inputs: zeros, TX-relative dx/dy/dz, or cached LOS clearance [F,0,0]")
+                   help="secondU inputs: baseline or cached LOS clearance [F,0,0]")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
-    p.add_argument("--no-fingerprints", action="store_true",
-                   help="record paths, settings and versions without computing SHA256 hashes")
-    p.add_argument("--no-gradient-diagnostics", action="store_true",
-                   help="skip diagnostic gradient loss when grad-weight=0")
-    p.add_argument("--grad-weight", type=float, default=0.0,
-                   help="weight of valid-pair signed gradient L1 loss (normalized targets); default 0 preserves baseline")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -519,10 +477,8 @@ if __name__ == "__main__":
     a = build_parser().parse_args()
     if a.run_name is None:
         a.run_name = f"radiownet_{a.band}_{a.loss}_{a.phase}"
-        if a.grad_weight:
-            a.run_name += "_grad" + f"{a.grad_weight:g}".replace(".", "p")
-        if a.second_features != "none":
-            a.run_name += "_" + a.second_features
+        if a.second_features == "los":
+            a.run_name += "_los_both" if a.first_features == "los" else "_los"
     # The second stage is useless on top of a random first U-Net, so it seeds
     # itself from the firstU run by default; "none" is the explicit opt-out.
     if a.init_from is None and a.phase == "secondU":

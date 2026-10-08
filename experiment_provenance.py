@@ -1,6 +1,5 @@
-"""Small, read-only fingerprints for reproducible local/server experiments."""
+"""Lightweight code, data, settings and environment records for training runs."""
 
-import hashlib
 import platform
 from pathlib import Path
 import subprocess
@@ -10,48 +9,9 @@ import numpy as np
 import torch
 
 
-def fingerprint(path):
-    path = Path(path).resolve()
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return {"path": str(path), "bytes": path.stat().st_size,
-            "sha256": digest.hexdigest()}
-
-
-def first_stage_hash(state):
-    digest = hashlib.sha256()
-    for name, value in sorted(state.items()):
-        if not name.startswith("W"):
-            value = value.detach().cpu().contiguous()
-            digest.update(f"{name}|{value.dtype}|{tuple(value.shape)}".encode())
-            digest.update(value.numpy().tobytes())
-    return digest.hexdigest()
-
-
 def collect_provenance(data_root, loader_module, checkpoints, args):
     root = Path(__file__).resolve().parent
     data_root = Path(data_root).resolve()
-    files = [data_root / "metadata.json", Path(loader_module.__file__)]
-    for split in ("train", "val"):
-        candidates = (data_root / f"{split}_index.csv", data_root / split / "index.csv")
-        index = next((p for p in candidates if p.exists()), None)
-        if index is not None:
-            files.append(index)
-    code = [root / name for name in (
-        "train.py", "evaluate.py", "metrics.py", "boundary.py", "radiounet.py",
-        "lunar_dataset.py", "RadioUNet/modules.py", "experiment_provenance.py",
-        "ablate_boundary.py", "ablate_coordinates.py", "los_features.py",
-        "build_los_cache.py", "run_los.py")]
-
-    hashing = not getattr(args, "no_fingerprints", False)
-
-    def record(path):
-        if hashing:
-            return fingerprint(path)
-        path = Path(path).resolve()
-        return {"path": str(path), "bytes": path.stat().st_size}
 
     def git(*command):
         try:
@@ -71,9 +31,8 @@ def collect_provenance(data_root, loader_module, checkpoints, args):
                         "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None},
         "git_commit": git("rev-parse", "HEAD"),
         "git_status": git("status", "--short"),
-        "fingerprints_enabled": hashing,
-        "code": [record(p) for p in code if p.exists()],
-        "data_metadata_and_actual_loader": [record(p) for p in files],
-        "checkpoints": {key: record(path) for key, path in checkpoints.items()},
-        "data_array_hashes": "Not computed; data version is identified by the supplied dataset path.",
+        "data_root": str(data_root),
+        "data_metadata": str(data_root / "metadata.json"),
+        "actual_loader": str(Path(loader_module.__file__).resolve()),
+        "checkpoints": {key: str(Path(path).resolve()) for key, path in checkpoints.items()},
     }
