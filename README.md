@@ -63,7 +63,7 @@ python evaluate.py --ckpt runs/<run>_best.pt --data-root <data> --split val
 | `score_submission.py`           | validates a submission directory; `--validate-only` needs no ground truth |
 | `metrics.py`                    | RMSE / NMSE / PSNR / SSIM, with masked variants                           |
 | `radiounet.py`                  | seam onto the vendored upstream model                                     |
-| `los_features.py`              | input-only terrain clearance and jointly augmented cached features         |
+| `los_features.py`              | input-only terrain clearance, log-distance and cached features              |
 | `build_los_cache.py`           | builds or reuses train/val/test LOS caches                                  |
 | `run_los.py`                   | runs two seeds, each with firstU then secondU LOS training                   |
 | `experiment_provenance.py`     | code version, data/loader paths, settings and environment records            |
@@ -142,6 +142,7 @@ height, TX, F, labels and masks receive the same augmentation.
 | baseline | height, TX | out1, height, TX |
 | historical secondU LOS | height, TX | out1, height, TX, F, 0, 0 |
 | both-stage LOS | height, TX, F | out1, height, TX, F, 0, 0 |
+| LOS + distance refinement | height, TX, F | out1, height, TX, F, rho, 0 |
 
 `--first-features los --second-features los` selects the new mode. Initializing
 from a historical LOS checkpoint adds 579 zero weights in firstU's three input
@@ -171,6 +172,51 @@ Gradient loss, boundary reports, coordinate ablations and hash audits are remove
 from the active code. Archived experiments and temporary checks stay outside
 the repository. Research records in `docs/` also stay local and Git-ignored;
 do not force-add them.
+
+### LOS + log-distance in secondU
+
+`--first-features los --second-features los_distance --phase secondU` keeps
+firstU frozen and fills an existing zero channel in secondU with
+`rho = log1p(d3/1m) / log1p(d_max/1m)`. The grid distance `d3` uses height plus
+the TX/RX antenna heights, all in metres; `d_max` comes from training metadata
+height bounds, pixel resolution and grid extent. Distance is computed in FP32
+after the joint augmentation, using only height and TX. It takes O(BHW) time
+and extra memory and adds no model parameters relative to both-stage LOS.
+
+Distance encoding and the final secondU layout are saved separately from the
+original LOS cache definition, so existing caches remain usable. Initializing
+with `--init-from` a LOS checkpoint copies the same model weights; evaluation
+restores the distance mode automatically. Resume requires the same input mode.
+
+Run seeds 0 and 1 from their corresponding **both-stage LOS firstU best**
+checkpoints, with fresh Adam and cosine state. Use the existing secondU LOS
+results as the reference; no firstU retraining or repeated LOS control is
+needed. This is an input representation hypothesis whose benefit must be
+measured on full-val masked RMSE.
+
+```bash
+(
+set -e
+out_root=runs/los_distance_v1
+mkdir "$out_root"
+for seed in 0 1; do
+  python train.py --data-root <data> --los-cache results/los_cache_v1 \
+    --band 58 --phase secondU --loss masked \
+    --first-features los --second-features los_distance \
+    --init-from "runs/los_both_v1/seed${seed}/firstU/radiownet_58_masked_firstU_los_both_best.pt" \
+    --seed "$seed" --epochs 150 --batch-size 16 \
+    --lr 1e-4 --lr-sched cosine --lr-min 1e-6 --clip 0 \
+    --amp --device cuda --num-workers 8 --panels 0 \
+    --out "$out_root/seed${seed}/secondU" \
+    --run-name radiownet_58_masked_secondU_los_distance_both
+  python evaluate.py --data-root <data> --los-cache results/los_cache_v1 \
+    --ckpt "$out_root/seed${seed}/secondU/radiownet_58_masked_secondU_los_distance_both_best.pt" \
+    --band 58 --phase secondU --split val --batch-size 16 \
+    --amp --device cuda --num-workers 8 --panels 0 \
+    --out "$out_root/seed${seed}/secondU/val.json"
+done
+)
+```
 
 ---
 

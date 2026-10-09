@@ -1,4 +1,4 @@
-"""Input-only terrain clearance and its memory-mapped dataset adapter.
+"""Input-only terrain clearance, log-distance and the cached dataset adapter.
 
 The scalar is an approximate LOS representation, not a simulator LOS label.
 Targets and validity masks are never used to construct it.
@@ -22,6 +22,49 @@ def los_feature_config(geometry):
         "include_endpoints": True, "computation_dtype": "float32",
         "encoding": "asinh(C/scale_m)/asinh(height_range_m/scale_m)",
         "scale_m": 1.0, "second_channels": ["F", 0.0, 0.0]}}
+
+
+def log_distance_config(geometry):
+    """Fixed distance encoding bounds from training metadata, in metres."""
+    h, w = geometry["grid"]
+    resolution = geometry["resolution_m_per_px"]
+    lo, hi = geometry["heightmap_range_m"]
+    max_vertical = hi - lo + abs(geometry["rx_height_m_agl"] - geometry["tx_height_m_agl"])
+    maximum = math.sqrt(((h - 1) * resolution) ** 2 +
+                        ((w - 1) * resolution) ** 2 + max_vertical ** 2)
+    return {"version": 1, "quantity": "tx_rx_grid_3d_distance_m",
+            "encoding": "log1p(d/scale_m)/log1p(max_distance_m/scale_m)",
+            "scale_m": 1.0, "max_distance_m": maximum,
+            "computation_dtype": "float32"}
+
+
+@torch.no_grad()
+def log_distance_feature(input, config):
+    """Encode distance from normalized height and one-hot TX only, after D4.
+
+    The RX follows the grid terrain plus its metadata antenna height. This is
+    a geometric input proxy, not the length of a simulated multipath. Time and
+    extra memory are O(BHW); targets, masks and LOS cache values are unused.
+    """
+    with torch.autocast(input.device.type, enabled=False):
+        lo, hi = config["heightmap_range_m"]
+        height = input[:, 0].float() * (hi - lo) + lo
+        _, h, w = height.shape
+        tx_index = input[:, 1].flatten(1).argmax(1)
+        tx_row = (tx_index // w).float()[:, None, None]
+        tx_col = (tx_index % w).float()[:, None, None]
+        z_tx = height.flatten(1).gather(1, tx_index[:, None])[:, :, None]
+        z_tx = z_tx + config["tx_height_m_agl"]
+        rows = torch.arange(h, dtype=torch.float32, device=input.device)[None, :, None]
+        cols = torch.arange(w, dtype=torch.float32, device=input.device)[None, None, :]
+        resolution = config["resolution_m_per_px"]
+        squared = ((rows - tx_row) * resolution).square() + ((cols - tx_col) * resolution).square()
+        squared = squared + (height + config["rx_height_m_agl"] - z_tx).square()
+        distance = squared.sqrt()
+        encoding = config["distance"]
+        feature = torch.log1p(distance / encoding["scale_m"])
+        feature = feature / math.log1p(encoding["max_distance_m"] / encoding["scale_m"])
+    return feature[:, None].to(dtype=input.dtype)
 
 
 @torch.no_grad()

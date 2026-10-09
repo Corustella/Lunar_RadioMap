@@ -34,7 +34,7 @@ https://github.com/RonLevie/RadioUNet"""
 
 _cached = None
 FIRST_FEATURES = ("none", "los")
-SECOND_FEATURES = ("none", "los")
+SECOND_FEATURES = ("none", "los", "los_distance")
 _FIRST_WEIGHTS = ("layer00.0.weight", "conv_up00.0.weight",
                   "conv_up000.0.weight")
 _SECOND_WEIGHTS = ("Wlayer00.0.weight", "Wconv_up00.0.weight",
@@ -62,11 +62,17 @@ def geometry_config(meta):
 def feature_config_for_mode(meta, mode):
     if mode == "none":
         return None
-    if mode != "los":
+    if mode not in ("los", "los_distance"):
         raise ValueError(f"Unsupported feature mode {mode!r}; supported modes are {SECOND_FEATURES}")
     config = geometry_config(meta)
-    from los_features import los_feature_config
-    return los_feature_config(config)
+    from los_features import los_feature_config, log_distance_config
+    config = los_feature_config(config)
+    if mode == "los_distance":
+        config["distance"] = log_distance_config(config)
+        # Keep the legacy LOS cache definition intact. This top-level layout
+        # describes the refinement inputs when distance replaces a zero slot.
+        config["second_channels"] = ["F", "rho", 0.0]
+    return config
 
 
 def checkpoint_first_features(checkpoint):
@@ -78,8 +84,8 @@ def checkpoint_first_features(checkpoint):
         raise ValueError(f"Unknown checkpoint first_features={first!r}")
     if second not in SECOND_FEATURES:
         raise ValueError(f"Unknown checkpoint second_features={second!r}; this experimental mode was archived")
-    if first == "los" and second != "los":
-        raise ValueError("first_features='los' requires second_features='los'")
+    if first == "los" and second == "none":
+        raise ValueError("first_features='los' requires LOS secondU features")
     return first
 
 
@@ -110,19 +116,22 @@ def _append_los(model, args):
         raise ValueError(f"Expected {expected} input channels, got {input.shape[1]}")
     with torch.no_grad():
         feature = input[:, model.base_inputs:model.base_inputs + 1]
-        # Both placements have exactly the historical secondU input layout:
-        # [out1, base channels, F, 0, 0]. The upstream firstU slice decides
-        # whether F is also visible to firstU.
-        return (torch.cat((input, torch.zeros_like(feature),
+        distance = torch.zeros_like(feature)
+        if model.second_features == "los_distance":
+            from los_features import log_distance_feature
+            distance = log_distance_feature(input, model.feature_config)
+        # firstU slices only base channels plus F when enabled; rho occupies
+        # a previously zero secondU slot and is never supplied to firstU.
+        return (torch.cat((input, distance,
                            torch.zeros_like(feature)), dim=1),)
 
 
 def load_model_state(model, checkpoint, initialize=False):
-    """Strict load, allowing LOS input additions only for init-from.
+    """Strict load, allowing LOS/distance input additions only for init-from.
 
     Added channels are appended in all three input skips. Old columns and all
-    biases are copied exactly; the added columns start at zero. Resume never
-    migrates shapes, modes or geometry scales.
+    biases are copied exactly; the added columns start at zero. LOS to distance
+    reuses the same weights and shapes. Resume never migrates feature modes.
     """
     source_first = checkpoint_first_features(checkpoint)
     source_mode, source_config = checkpoint_features(checkpoint)
@@ -131,10 +140,15 @@ def load_model_state(model, checkpoint, initialize=False):
     same = (source_first == target_first and source_mode == target_mode and
             source_config == model.feature_config)
     first_added = source_first == "none" and target_first == "los"
-    second_added = source_mode == "none" and target_mode == "los"
+    second_added = source_mode == "none" and target_mode in ("los", "los_distance")
+    distance_added = source_mode == "los" and target_mode == "los_distance"
+    source_matches_los = False
+    if distance_added:
+        source_matches_los = source_config == feature_config_for_mode(
+            {**model.feature_config, "simulation": model.feature_config}, "los")
     compatible = ((source_first == target_first or first_added) and
-                  (source_mode == target_mode or second_added) and
-                  (source_config == model.feature_config or second_added))
+                  (source_mode == target_mode or second_added or distance_added) and
+                  (source_config == model.feature_config or second_added or source_matches_los))
     migrate = initialize and not same and compatible
     if not same and not migrate:
         raise ValueError("Checkpoint feature mode/scales differ; resume and evaluation require an exact match")
@@ -160,7 +174,7 @@ def load_model_state(model, checkpoint, initialize=False):
     return {"source_mode": source_mode, "target_mode": target_mode,
             "source_first_features": source_first,
             "target_first_features": target_first,
-            "zero_padded_weights": padded_names}
+            "zero_padded_weights": padded_names, "distance_added": distance_added}
 
 
 def load_module():
@@ -201,16 +215,17 @@ def _expand_inputs(model, names, added):
 
 def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=None,
               first_features="none"):  # noqa: N802
-    """Build the upstream model with LOS supplied to secondU or both stages.
+    """Build the upstream model with LOS and optional secondU log-distance.
 
     State keys and the upstream forward remain unchanged. A both-stage model
     expands firstU's three input convolutions by one channel, preserving hidden
-    widths even for band=both. Preparing the cached F plus two zero channels is
-    O(BHW) time and extra memory. At inputs=2, firstU adds only 579 parameters.
+    widths even for band=both. Distance uses an existing zero secondU slot, so
+    its parameter count matches LOS. Feature preparation takes O(BHW) time and
+    extra memory. At inputs=2, firstU adds only 579 parameters.
     """
     checkpoint_first_features({"args": {"first_features": first_features,
                                         "second_features": second_features}})
-    if second_features == "los" and inputs < 2:
+    if second_features != "none" and inputs < 2:
         raise ValueError("LOS requires height and TX input channels")
     if second_features != "none":
         checkpoint_features({"args": {"first_features": first_features,

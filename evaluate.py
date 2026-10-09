@@ -138,12 +138,15 @@ def main(args):
                                    return_name=True, return_mask=need_mask)
     if feature_config_for_mode(base.meta, second_features) != feature_config:
         raise ValueError("Evaluation metadata differs from checkpoint geometry scales")
-    if second_features == "los":
+    if second_features != "none":
         from los_features import LOSDataset
         cache_root = args.los_cache or saved.get("los_cache")
         if not cache_root:
             raise ValueError("LOS evaluation requires --los-cache")
-        base = LOSDataset(base, cache_root, feature_config)
+        # Distance is constructed from augmented inputs in the model. The
+        # existing cache contains F only and keeps its original metadata.
+        cache_config = feature_config_for_mode(base.meta, "los")
+        base = LOSDataset(base, cache_root, cache_config)
     lo, hi = base.pl_min, base.pl_max
     scale = float(hi - lo)
     ds = ScoredSet(base, lo, hi, need_mask)

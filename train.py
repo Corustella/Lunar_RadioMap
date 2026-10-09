@@ -121,7 +121,7 @@ def resolve_init_from(args):
 
 def make_loaders(ld, args):
     common = dict(root=args.data_root, band=args.band, return_mask=True)
-    use_los = args.second_features == "los"
+    use_los = args.second_features != "none"
     train_ds = ld.LunarRadioMapDataset(split="train", augment=not args.no_augment and not use_los,
                                        **common)
     val_ds = ld.LunarRadioMapDataset(split="val", augment=False, **common)
@@ -199,10 +199,12 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
 
 
 def main(args):
-    if args.first_features == "los" and args.second_features != "los":
-        raise ValueError("--first-features los requires --second-features los")
-    if args.second_features == "los" and args.first_features == "none" and args.phase == "firstU":
+    if args.first_features == "los" and args.second_features == "none":
+        raise ValueError("--first-features los requires LOS secondU features")
+    if args.second_features != "none" and args.first_features == "none" and args.phase == "firstU":
         raise ValueError("LOS firstU training requires --first-features los")
+    if args.second_features == "los_distance" and args.phase != "secondU":
+        raise ValueError("--second-features los_distance trains only secondU; initialize from a LOS firstU checkpoint")
     ld = load_dataset_module(args.data_root)
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -431,9 +433,9 @@ def build_parser():
                         "run is selected and ranked on valid pixels.")
     p.add_argument("--phase", default="firstU", choices=["firstU", "secondU"])
     p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,
-                   help="append cached LOS clearance F to firstU; requires --second-features los")
+                   help="append cached LOS clearance F to firstU; requires LOS secondU features")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
-                   help="secondU inputs: baseline or cached LOS clearance [F,0,0]")
+                   help="secondU inputs: none, los [F,0,0], or los_distance [F,rho,0]")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
@@ -479,6 +481,8 @@ if __name__ == "__main__":
         a.run_name = f"radiownet_{a.band}_{a.loss}_{a.phase}"
         if a.second_features == "los":
             a.run_name += "_los_both" if a.first_features == "los" else "_los"
+        elif a.second_features == "los_distance":
+            a.run_name += "_los_distance_both" if a.first_features == "los" else "_los_distance"
     # The second stage is useless on top of a random first U-Net, so it seeds
     # itself from the firstU run by default; "none" is the explicit opt-out.
     if a.init_from is None and a.phase == "secondU":
