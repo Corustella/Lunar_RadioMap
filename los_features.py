@@ -1,4 +1,4 @@
-"""Input-only terrain clearance, log-distance and the cached dataset adapter.
+"""Input-only terrain clearance, distance, FSPL and the cached dataset adapter.
 
 The scalar is an approximate LOS representation, not a simulator LOS label.
 Targets and validity masks are never used to construct it.
@@ -39,8 +39,8 @@ def log_distance_config(geometry):
 
 
 @torch.no_grad()
-def log_distance_feature(input, config):
-    """Encode distance from normalized height and one-hot TX only, after D4.
+def tx_rx_distance(input, config):
+    """FP32 grid-to-TX antenna distance from normalized height and TX only.
 
     The RX follows the grid terrain plus its metadata antenna height. This is
     a geometric input proxy, not the length of a simulated multipath. Time and
@@ -60,11 +60,36 @@ def log_distance_feature(input, config):
         resolution = config["resolution_m_per_px"]
         squared = ((rows - tx_row) * resolution).square() + ((cols - tx_col) * resolution).square()
         squared = squared + (height + config["rx_height_m_agl"] - z_tx).square()
-        distance = squared.sqrt()
+        return squared.sqrt()[:, None]
+
+
+@torch.no_grad()
+def log_distance_feature(input, config):
+    """Encode geometric distance after D4, preserving the input tensor dtype."""
+    with torch.autocast(input.device.type, enabled=False):
+        distance = tx_rx_distance(input, config)
         encoding = config["distance"]
         feature = torch.log1p(distance / encoding["scale_m"])
         feature = feature / math.log1p(encoding["max_distance_m"] / encoding["scale_m"])
-    return feature[:, None].to(dtype=input.dtype)
+    return feature.to(dtype=input.dtype)
+
+
+@torch.no_grad()
+def fspl_feature(input, config):
+    """Normalized free-space loss, calculated independently of rounded rho.
+
+    Return FP32 so an AMP residual is added to the prior without rounding it
+    to half precision. Only the signed residual is learned; no clipping is
+    applied to the reconstructed pathloss. Time and extra memory are O(BHW).
+    """
+    with torch.autocast(input.device.type, enabled=False):
+        distance = tx_rx_distance(input, config)
+        prior = config["fspl"]
+        distance = distance.clamp_min(prior["minimum_distance_m"])
+        loss_db = 20 * torch.log10(4 * math.pi * distance * config["frequency_hz"] /
+                                 prior["speed_of_light_m_s"])
+        lo, hi = config["pathloss_range_db"]
+        return (loss_db - lo) / (hi - lo)
 
 
 @torch.no_grad()

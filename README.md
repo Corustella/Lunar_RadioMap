@@ -220,6 +220,32 @@ done
 
 ---
 
+### Paired direct / FSPL-residual outputs
+
+For the band-58 secondU experiment, keep the same LOS + distance inputs and
+frozen firstU. `--second-output linear` predicts pathloss directly with a
+signed final head; `--second-output fspl_residual` predicts a signed correction
+and returns `FSPL + correction`. The historical default remains `relu`.
+FSPL is `20*log10(4*pi*d3*f/c)`, using metadata frequency, terrain-relative
+TX/RX heights and metres. Both FSPL and its addition are computed in FP32;
+the returned map is normalized pathloss, so masked MSE and evaluation keep
+their original meaning. Residual normalization divides by the training
+pathloss range without subtracting its lower bound again.
+
+Initialize both groups from each seed's `los_distance_v1` best checkpoint
+with `--init-from` and `--reset-second-head`. Only the final secondU convolution
+is reset, with identical parameters for matching seeds from a separate seeded
+generator; firstU and the refinement backbone are copied. This changes the
+initial predictions. No model parameters, loss terms, dependencies or LOS
+cache channels are added. Prior computation takes O(BHW) time and memory.
+
+Run both groups with seeds 0 and 1 under the same training settings. Compare
+the paired groups and the existing distance result, rather than claiming
+improvement merely from a smaller residual target. Checkpoints record the
+output mode, fixed geometry/frequency/scales and head initialization.
+Evaluation restores the mode automatically. Resume requires the same mode
+and omits `--reset-second-head`; it restores the trained head and optimizer.
+
 ## Submitting
 
 **Kaggle leaderboard.** One row per pixel:

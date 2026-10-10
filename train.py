@@ -77,7 +77,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels 
 from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
-                       feature_config_for_mode, load_model_state)
+                       SECOND_OUTPUTS, feature_config_for_mode, load_model_state,
+                       second_output_config)
 from experiment_provenance import collect_provenance
 
 
@@ -205,6 +206,11 @@ def main(args):
         raise ValueError("LOS firstU training requires --first-features los")
     if args.second_features == "los_distance" and args.phase != "secondU":
         raise ValueError("--second-features los_distance trains only secondU; initialize from a LOS firstU checkpoint")
+    if args.second_output != "relu" and (args.phase != "secondU" or args.band != "58"):
+        raise ValueError("The linear/FSPL output experiment requires --phase secondU --band 58")
+    if args.reset_second_head:
+        if args.second_output == "relu" or args.resume or not args.init_from or args.init_from == "auto":
+            raise ValueError("--reset-second-head requires a new linear/FSPL run with an explicit --init-from; do not use it with --resume")
     ld = load_dataset_module(args.data_root)
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -218,9 +224,11 @@ def main(args):
 
     out_idx = 0 if args.phase == "firstU" else 1
     feature_config = feature_config_for_mode(ds.meta, args.second_features)
+    output_config = second_output_config(ds.meta, args.second_output, args.band)
     model = RadioWNet(inputs=in_ch, phase=args.phase,
                      second_features=args.second_features, feature_config=feature_config,
-                     first_features=args.first_features).to(device)
+                     first_features=args.first_features, second_output=args.second_output,
+                     output_config=output_config).to(device)
     
     for pname, prm in model.named_parameters():
         prm.requires_grad_(trains_in_phase(pname, args.phase))
@@ -299,11 +307,15 @@ def main(args):
         if prev.get("band", args.band) != args.band:
             raise SystemExit(f"--init-from {path} was trained on band "
                              f"{prev.get('band')}, this run is band {args.band}")
-        weight_loading = load_model_state(model, ck, initialize=True)
+        weight_loading = load_model_state(model, ck, initialize=True,
+                                          reset_second_head=args.reset_second_head,
+                                          head_seed=args.seed)
         print(f"initialized weights from {path} (phase {prev.get('phase', '?')}, "
               f"epoch {ck.get('epoch')}, best {ck.get('best', float('nan')):.4f} dB); "
               f"optimizer and LR schedule start fresh")
     elif args.phase == "secondU" and not resumed:
+        if args.second_output != "relu":
+            raise ValueError("The output experiment requires a trained --init-from checkpoint or an existing --resume")
         print("warning: training secondU from random init -- the frozen first "
               "U-Net is untrained, so its output is noise. Pass --init-from "
               "<firstU checkpoint>.")
@@ -312,6 +324,8 @@ def main(args):
     provenance["first_features"] = args.first_features
     provenance["second_features"] = args.second_features
     provenance["feature_config"] = feature_config
+    provenance["second_output"] = args.second_output
+    provenance["output_config"] = output_config
     provenance["weight_loading"] = weight_loading
     # On resume retain the original initialization record as well.
     prov_path = os.path.join(args.out, f"{args.run_name}_provenance.json")
@@ -329,7 +343,8 @@ def main(args):
 
     print(f"training {args.run_name}: band={args.band} loss={args.loss} "
           f"phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
-          f"first_features={args.first_features} second_features={args.second_features}")
+          f"first_features={args.first_features} second_features={args.second_features} "
+          f"second_output={args.second_output}")
 
     hist_cols = None
     for epoch in range(start_epoch, args.epochs):
@@ -401,7 +416,8 @@ def main(args):
         state = {"model": model.state_dict(), "opt": opt.state_dict(),
                  "sched": sched.state_dict(), "lr_sched": args.lr_sched,
                  "epoch": epoch, "best": best, "args": vars(args),
-                 "metrics": metrics, "feature_config": feature_config}
+                 "metrics": metrics, "feature_config": feature_config,
+                 "output_config": output_config}
         torch.save(state, ckpt_last)
         if sel < best:
             best = sel
@@ -414,6 +430,7 @@ def main(args):
                    "phase": args.phase, "init_from": args.init_from,
                    "first_features": args.first_features,
                    "second_features": args.second_features, "feature_config": feature_config,
+                   "second_output": args.second_output, "output_config": output_config,
                    "selection_metric": "val/rmse_db_masked",
                    "best": best, "epochs": args.epochs}, f, indent=2)
     print(f"done. best {best:.4f} dB (valid pixels only)")
@@ -436,6 +453,10 @@ def build_parser():
                    help="append cached LOS clearance F to firstU; requires LOS secondU features")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
                    help="secondU inputs: none, los [F,0,0], or los_distance [F,rho,0]")
+    p.add_argument("--second-output", default="relu", choices=SECOND_OUTPUTS,
+                   help="secondU output: historical relu, signed linear direct, or FSPL plus signed residual")
+    p.add_argument("--reset-second-head", action="store_true",
+                   help="reset only the final secondU convolution from --seed on init-from; pair with linear/FSPL output")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
@@ -483,6 +504,8 @@ if __name__ == "__main__":
             a.run_name += "_los_both" if a.first_features == "los" else "_los"
         elif a.second_features == "los_distance":
             a.run_name += "_los_distance_both" if a.first_features == "los" else "_los_distance"
+        if a.second_output != "relu":
+            a.run_name += "_" + a.second_output
     # The second stage is useless on top of a random first U-Net, so it seeds
     # itself from the firstU run by default; "none" is the explicit opt-out.
     if a.init_from is None and a.phase == "secondU":

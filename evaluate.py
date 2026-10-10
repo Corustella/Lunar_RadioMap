@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels, ssim  
 from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features, feature_config_for_mode,
-                       load_model_state)  # noqa: E402
+                       checkpoint_output, load_model_state, second_output_config)  # noqa: E402
 
 BANDS = ("415", "58")
 
@@ -115,8 +115,10 @@ def main(args):
     in_ch = 3 if band == "both" else 2
     second_features, feature_config = checkpoint_features(ck)
     first_features = checkpoint_first_features(ck)
+    second_output, output_config = checkpoint_output(ck)
     model = RadioWNet(inputs=in_ch, phase=phase, second_features=second_features,
-                     feature_config=feature_config, first_features=first_features).to(device)
+                     feature_config=feature_config, first_features=first_features,
+                     second_output=second_output, output_config=output_config).to(device)
     load_model_state(model, ck)
     model.eval()
     print(f"loaded {args.ckpt} (epoch {ck.get('epoch')}, band {band}, phase {phase}, "
@@ -138,6 +140,8 @@ def main(args):
                                    return_name=True, return_mask=need_mask)
     if feature_config_for_mode(base.meta, second_features) != feature_config:
         raise ValueError("Evaluation metadata differs from checkpoint geometry scales")
+    if second_output_config(base.meta, second_output, band) != output_config:
+        raise ValueError("Evaluation metadata differs from checkpoint output scales/frequency")
     if second_features != "none":
         from los_features import LOSDataset
         cache_root = args.los_cache or saved.get("los_cache")
@@ -222,6 +226,7 @@ def main(args):
                "phase": phase, "epoch": ck.get("epoch"), "samples": len(per_sample),
                "first_features": first_features, "second_features": second_features,
                "feature_config": feature_config,
+               "second_output": second_output, "output_config": output_config,
                "official_metric": "rmse_db_masked" if need_mask else None}
     summary.update(accs["all"].compute())
     # a band with no items (only reachable under --limit, which walks 415 first)

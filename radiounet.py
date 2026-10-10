@@ -35,6 +35,7 @@ https://github.com/RonLevie/RadioUNet"""
 _cached = None
 FIRST_FEATURES = ("none", "los")
 SECOND_FEATURES = ("none", "los", "los_distance")
+SECOND_OUTPUTS = ("relu", "linear", "fspl_residual")
 _FIRST_WEIGHTS = ("layer00.0.weight", "conv_up00.0.weight",
                   "conv_up000.0.weight")
 _SECOND_WEIGHTS = ("Wlayer00.0.weight", "Wconv_up00.0.weight",
@@ -73,6 +74,52 @@ def feature_config_for_mode(meta, mode):
         # describes the refinement inputs when distance replaces a zero slot.
         config["second_channels"] = ["F", "rho", 0.0]
     return config
+
+
+def second_output_config(meta, mode, band):
+    """Output convention and fixed training scales for a single-band model."""
+    if mode == "relu":
+        return None
+    if mode not in SECOND_OUTPUTS:
+        raise ValueError(f"Unsupported second output {mode!r}; supported modes are {SECOND_OUTPUTS}")
+    band = str(band)
+    if band not in ("415", "58"):
+        raise ValueError("Linear and FSPL output modes require one frequency band")
+    lo, hi = map(float, meta["pathloss_range_db"])
+    frequency = float(meta["bands_hz"][band])
+    if not all(math.isfinite(v) for v in (lo, hi, frequency)) or hi <= lo or frequency <= 0:
+        raise ValueError("Output metadata requires finite, positive frequency and normalization scales")
+    return {**geometry_config(meta), "mode": mode, "band": band,
+            "frequency_hz": frequency, "pathloss_range_db": [lo, hi],
+            "quantity": "normalized_pathloss",
+            "normalization": "(pathloss_db-lo)/(hi-lo)",
+            "residual_units": "residual_db/(hi-lo)",
+            "fspl": {"formula": "20*log10(4*pi*d_m*frequency_hz/c_m_s)",
+                     "speed_of_light_m_s": 299792458.0,
+                     "minimum_distance_m": 1e-6, "computation_dtype": "float32"}}
+
+
+def checkpoint_output(checkpoint):
+    """Legacy output is ReLU; new checkpoints must carry exact output scales."""
+    saved = checkpoint.get("args", {})
+    mode = saved.get("second_output", "relu")
+    config = checkpoint.get("output_config")
+    if mode not in SECOND_OUTPUTS:
+        raise ValueError(f"Unknown checkpoint second_output={mode!r}")
+    if mode == "relu":
+        if config is not None:
+            raise ValueError("ReLU checkpoint must not contain output_config")
+        return mode, None
+    if config is None or config.get("version") != 1:
+        raise ValueError("Linear/FSPL checkpoint lacks a supported output_config")
+    band = config.get("band")
+    if saved.get("band", band) != band:
+        raise ValueError("Checkpoint band differs from output_config")
+    meta = {**config, "simulation": config,
+            "bands_hz": {band: config.get("frequency_hz")}}
+    if second_output_config(meta, mode, band) != config:
+        raise ValueError("Invalid checkpoint output_config")
+    return mode, config
 
 
 def checkpoint_first_features(checkpoint):
@@ -126,15 +173,54 @@ def _append_los(model, args):
                            torch.zeros_like(feature)), dim=1),)
 
 
-def load_model_state(model, checkpoint, initialize=False):
-    """Strict load, allowing LOS/distance input additions only for init-from.
+def _add_fspl(model, args, output):
+    from los_features import fspl_feature
+
+    (input,) = args
+    return [output[0], output[1] + fspl_feature(input, model.output_config)]
+
+
+def reset_second_output_head(model, seed):
+    """Same signed head for both paired modes, independent of global RNG use."""
+    import torch
+
+    head = model.Wconv_up000[0]
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    # This is Conv2d's default Kaiming-uniform(a=sqrt(5)) initialization.
+    bound = 1 / math.sqrt(head.in_channels * math.prod(head.kernel_size))
+    with torch.no_grad():
+        weight = torch.empty(head.weight.shape, dtype=head.weight.dtype, device="cpu")
+        weight.uniform_(-bound, bound, generator=generator)
+        head.weight.copy_(weight)
+        if head.bias is not None:
+            bias = torch.empty(head.bias.shape, dtype=head.bias.dtype, device="cpu")
+            bias.uniform_(-bound, bound, generator=generator)
+            head.bias.copy_(bias)
+    return {"seed": int(seed), "weights": ["Wconv_up000.0.weight", "Wconv_up000.0.bias"],
+            "initialization": "Conv2d_default_uniform_local_cpu_generator"}
+
+
+def load_model_state(model, checkpoint, initialize=False, reset_second_head=False,
+                     head_seed=None):
+    """Strict load, with explicit input and output migrations for init-from.
 
     Added channels are appended in all three input skips. Old columns and all
     biases are copied exactly; the added columns start at zero. LOS to distance
     reuses the same weights and shapes. Resume never migrates feature modes.
+    ReLU to a signed output requires an explicit head reset; both experimental
+    modes use the same local seed while every other loaded parameter is kept.
     """
     source_first = checkpoint_first_features(checkpoint)
     source_mode, source_config = checkpoint_features(checkpoint)
+    source_output, source_output_config = checkpoint_output(checkpoint)
+    same_output = (source_output == model.second_output and
+                   source_output_config == model.output_config)
+    if reset_second_head and (not initialize or model.second_output == "relu" or head_seed is None):
+        raise ValueError("Head reset requires init-from, a signed output mode and an explicit seed")
+    migrate_output = (initialize and reset_second_head and source_output == "relu" and
+                      model.second_output in ("linear", "fspl_residual"))
+    if not same_output and not migrate_output:
+        raise ValueError("Checkpoint output mode/scales differ; init-from migration requires explicit head reset")
     target_first = model.first_features
     target_mode = model.second_features
     same = (source_first == target_first and source_mode == target_mode and
@@ -171,10 +257,13 @@ def load_model_state(model, checkpoint, initialize=False):
                 state[name] = padded
                 padded_names.append(name)
     model.load_state_dict(state, strict=True)
+    head_reset = reset_second_output_head(model, head_seed) if reset_second_head else None
     return {"source_mode": source_mode, "target_mode": target_mode,
             "source_first_features": source_first,
             "target_first_features": target_first,
-            "zero_padded_weights": padded_names, "distance_added": distance_added}
+            "zero_padded_weights": padded_names, "distance_added": distance_added,
+            "source_second_output": source_output, "target_second_output": model.second_output,
+            "second_head_reset": head_reset}
 
 
 def load_module():
@@ -214,8 +303,8 @@ def _expand_inputs(model, names, added):
 
 
 def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=None,
-              first_features="none"):  # noqa: N802
-    """Build the upstream model with LOS and optional secondU log-distance.
+              first_features="none", second_output="relu", output_config=None):  # noqa: N802
+    """Build the upstream model with input features and optional signed output.
 
     State keys and the upstream forward remain unchanged. A both-stage model
     expands firstU's three input convolutions by one channel, preserving hidden
@@ -233,17 +322,28 @@ def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=N
                              "feature_config": feature_config})
     elif feature_config is not None:
         raise ValueError("feature_config is only used by expanded models")
+    checkpoint_output({"args": {"second_output": second_output},
+                       "output_config": output_config})
+    if second_output != "relu" and inputs != 2:
+        raise ValueError("Linear/FSPL output modes require single-band height and TX inputs")
     model = load_module().RadioWNet(inputs=inputs, phase=phase)
     model.base_inputs = inputs
     model.first_features = first_features
     model.second_features = second_features
     model.feature_config = feature_config
+    model.second_output = second_output
+    model.output_config = output_config
     if first_features == "los":
         _expand_inputs(model, ("layer00", "conv_up00", "conv_up000"), 1)
         model.inputs = inputs + 1
     if second_features != "none":
         _expand_inputs(model, ("Wlayer00", "Wconv_up00", "Wconv_up000"), 3)
         model.register_forward_pre_hook(_append_los)
+    if second_output != "relu":
+        from torch import nn
+        model.Wconv_up000[1] = nn.Identity()
+    if second_output == "fspl_residual":
+        model.register_forward_hook(_add_fspl)
     return model
 
 
