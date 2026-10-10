@@ -1,4 +1,4 @@
-"""Build train/val LOS clearance caches once, using only height and TX inputs."""
+"""Build LOS or Fresnel-profile caches once, using only height and TX inputs."""
 
 import argparse
 import json
@@ -9,17 +9,19 @@ import time
 import numpy as np
 import torch
 
-from los_features import clearance_feature, read_cache
-from radiounet import feature_config_for_mode
+from los_features import clearance_feature, fresnel_feature, read_cache
+from radiounet import cache_config_for_feature
 from train import load_dataset_module
 
 
 def build_split(dataset, cache_root, config, device, loader_path, chunk, log_every):
     root = Path(cache_root)
     path, manifest_path = root / f"{dataset.split}.npy", root / f"{dataset.split}.json"
+    feature = "fresnel" if "fresnel" in config else "los"
+    compute = fresnel_feature if feature == "fresnel" else clearance_feature
     if manifest_path.exists():
         read_cache(root, dataset, config)
-        print(f"reuse complete LOS cache: {path}", flush=True)
+        print(f"reuse complete {feature} cache: {path}", flush=True)
         return
     if path.exists():
         raise FileExistsError(f"Cache has no completion record: {path}; use a new cache directory")
@@ -50,7 +52,7 @@ def build_split(dataset, cache_root, config, device, loader_path, chunk, log_eve
             if locations.shape != (1, 2) or np.count_nonzero(tx_map) != 1:
                 raise ValueError(f"Expected one-hot TX at {dataset.split} row {i}")
             tx = tuple(map(int, locations[0]))
-            array[i] = clearance_feature(height_m, tx, config, device, chunk)
+            array[i] = compute(height_m, tx, config, device, chunk)
             manifest["completed_rows"] = i + 1
             if log_every and ((i + 1) % log_every == 0 or i + 1 == len(dataset.rows)):
                 print(f"  cache {dataset.split}: {i + 1}/{len(dataset.rows)} "
@@ -72,11 +74,11 @@ def main(args):
         raise ValueError("--chunk must be positive")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA is unavailable for LOS cache construction")
+        raise RuntimeError("CUDA is unavailable for feature cache construction")
     ld = load_dataset_module(args.data_root)
     datasets = [ld.LunarRadioMapDataset(args.data_root, split=split, band="58", augment=False)
                 for split in args.splits]
-    config = feature_config_for_mode(datasets[0].meta, "los")
+    config = cache_config_for_feature(datasets[0].meta, args.feature)
     root = Path(args.cache_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     needed = 0
@@ -89,8 +91,8 @@ def main(args):
             needed += len(dataset.rows) * int(np.prod(config["grid"])) * 4 + 1024
     free = shutil.disk_usage(root).free
     if needed > free:
-        raise OSError(f"LOS cache requires about {needed / 1e9:.2f} GB; {free / 1e9:.2f} GB free")
-    print(f"LOS cache: {root}; new arrays {needed / 1e9:.2f} GB; loader {ld.__file__}", flush=True)
+        raise OSError(f"Feature cache requires about {needed / 1e9:.2f} GB; {free / 1e9:.2f} GB free")
+    print(f"{args.feature} cache: {root}; new arrays {needed / 1e9:.2f} GB; loader {ld.__file__}", flush=True)
     for dataset in datasets:
         build_split(dataset, root, config, device, str(Path(ld.__file__).resolve()),
                     args.chunk, args.log_every)
@@ -101,6 +103,8 @@ def build_parser():
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--cache-root", required=True,
                         help="new directory, or a complete cache with matching metadata/index")
+    parser.add_argument("--feature", choices=["los", "fresnel"], default="los",
+                        help="fresnel builds only g_F; reuse the existing LOS cache separately")
     parser.add_argument("--splits", nargs="+", choices=["train", "val", "test"], default=["train", "val"])
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--chunk", type=int, default=4096)

@@ -195,7 +195,6 @@ needed. This is an input representation hypothesis whose benefit must be
 measured on full-val masked RMSE.
 
 ```bash
-(
 set -e
 out_root=runs/los_distance_v1
 mkdir "$out_root"
@@ -215,36 +214,68 @@ for seed in 0 1; do
     --amp --device cuda --num-workers 8 --panels 0 \
     --out "$out_root/seed${seed}/secondU/val.json"
 done
-)
 ```
 
+### LOS + distance + Fresnel clearance in secondU
+
+`--second-features los_distance_fresnel` replaces the remaining zero channel
+with a signed Fresnel clearance proxy, keeping firstU frozen and the original
+direct pathloss output. Only band 58 is supported. At each interior horizontal
+profile sample `alpha`, use `C_perp = (z_ray-z_terrain) * D_h/D` and
+`r1 = sqrt(lambda * D * alpha * (1-alpha))`, then encode the minimum
+`C_perp/r1` as `gF = 2/pi * atan(min_ratio)`. The frequency is read from
+metadata (5775 MHz in this dataset). Endpoints are excluded; a coincident
+TX/RX grid position gets zero. This is a terrain-profile geometry proxy, not
+a diffraction-loss formula or an exact terrain/Fresnel-volume intersection.
+Its RMSE benefit remains an experimental hypothesis.
+The approximate Fresnel radius follows
+[ITU-R P.526, section 2.1](https://www.itu.int/dms_pubrec/itu-r/rec/p/R-REC-P.526-16-202511-I!!PDF-E.pdf);
+the signed profile proxy and its use as a neural-network input are this
+experiment's design, rather than a conclusion of that recommendation.
+
+Build a separate cache; existing LOS arrays are reused. Construction takes
+O(HW L) time per map and O(chunk L + HW) working memory, where L is the maximum
+number of profile samples. Float32 train + val arrays require about 7.35 GB.
+Height, TX, F, gF, target and mask share the same augmentation. No labels are
+used to construct either geometry feature.
+
+Initialize from the existing distance best checkpoint. All old weights and the
+output head are preserved; the last input column in the three secondU input
+connections is zeroed, preserving the starting prediction. The parameter
+count, loss, optimizer and learning-rate settings stay the same. Resume and
+evaluation require matching feature metadata. Archived signed-output
+checkpoints must be evaluated with their archived code.
+
+```bash
+python build_los_cache.py --data-root <data> \
+  --cache-root results/fresnel_cache_v1 --feature fresnel \
+  --splits train val --device cuda
+
+python train.py --data-root <data> \
+  --los-cache results/los_cache_v1 --fresnel-cache results/fresnel_cache_v1 \
+  --band 58 --phase secondU --loss masked \
+  --first-features los --second-features los_distance_fresnel \
+  --init-from runs/los_distance_v1/seed0/secondU/radiownet_58_masked_secondU_los_distance_both_best.pt \
+  --seed 0 --epochs 150 --batch-size 16 \
+  --lr 1e-4 --lr-sched cosine --lr-min 1e-6 --clip 0 \
+  --amp --device cuda --num-workers 8 --panels 0 \
+  --out runs/fresnel_v1/seed0/secondU \
+  --run-name radiownet_58_masked_secondU_fresnel
+
+python evaluate.py --data-root <data> \
+  --los-cache results/los_cache_v1 --fresnel-cache results/fresnel_cache_v1 \
+  --ckpt runs/fresnel_v1/seed0/secondU/radiownet_58_masked_secondU_fresnel_best.pt \
+  --band 58 --phase secondU --split val --batch-size 16 \
+  --amp --device cuda --num-workers 8 --panels 0 \
+  --out runs/fresnel_v1/seed0/secondU/val.json
+```
+
+Use seed 0 as the current screening run. Continue to seed 1 only if the
+full-val masked RMSE improves clearly; a single seed is not a final
+generalization claim. Local audits and retired source snapshots stay outside
+the repository.
+
 ---
-
-### Paired direct / FSPL-residual outputs
-
-For the band-58 secondU experiment, keep the same LOS + distance inputs and
-frozen firstU. `--second-output linear` predicts pathloss directly with a
-signed final head; `--second-output fspl_residual` predicts a signed correction
-and returns `FSPL + correction`. The historical default remains `relu`.
-FSPL is `20*log10(4*pi*d3*f/c)`, using metadata frequency, terrain-relative
-TX/RX heights and metres. Both FSPL and its addition are computed in FP32;
-the returned map is normalized pathloss, so masked MSE and evaluation keep
-their original meaning. Residual normalization divides by the training
-pathloss range without subtracting its lower bound again.
-
-Initialize both groups from each seed's `los_distance_v1` best checkpoint
-with `--init-from` and `--reset-second-head`. Only the final secondU convolution
-is reset, with identical parameters for matching seeds from a separate seeded
-generator; firstU and the refinement backbone are copied. This changes the
-initial predictions. No model parameters, loss terms, dependencies or LOS
-cache channels are added. Prior computation takes O(BHW) time and memory.
-
-Run both groups with seeds 0 and 1 under the same training settings. Compare
-the paired groups and the existing distance result, rather than claiming
-improvement merely from a smaller residual target. Checkpoints record the
-output mode, fixed geometry/frequency/scales and head initialization.
-Evaluation restores the mode automatically. Resume requires the same mode
-and omits `--reset-second-head`; it restores the trained head and optimizer.
 
 ## Submitting
 

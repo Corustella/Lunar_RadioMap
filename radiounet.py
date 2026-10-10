@@ -34,8 +34,7 @@ https://github.com/RonLevie/RadioUNet"""
 
 _cached = None
 FIRST_FEATURES = ("none", "los")
-SECOND_FEATURES = ("none", "los", "los_distance")
-SECOND_OUTPUTS = ("relu", "linear", "fspl_residual")
+SECOND_FEATURES = ("none", "los", "los_distance", "los_distance_fresnel")
 _FIRST_WEIGHTS = ("layer00.0.weight", "conv_up00.0.weight",
                   "conv_up000.0.weight")
 _SECOND_WEIGHTS = ("Wlayer00.0.weight", "Wconv_up00.0.weight",
@@ -63,63 +62,30 @@ def geometry_config(meta):
 def feature_config_for_mode(meta, mode):
     if mode == "none":
         return None
-    if mode not in ("los", "los_distance"):
+    if mode not in SECOND_FEATURES:
         raise ValueError(f"Unsupported feature mode {mode!r}; supported modes are {SECOND_FEATURES}")
     config = geometry_config(meta)
     from los_features import los_feature_config, log_distance_config
     config = los_feature_config(config)
-    if mode == "los_distance":
+    if mode in ("los_distance", "los_distance_fresnel"):
         config["distance"] = log_distance_config(config)
         # Keep the legacy LOS cache definition intact. This top-level layout
         # describes the refinement inputs when distance replaces a zero slot.
         config["second_channels"] = ["F", "rho", 0.0]
+    if mode == "los_distance_fresnel":
+        config["fresnel"] = cache_config_for_feature(meta, "fresnel")["fresnel"]
+        config["second_channels"] = ["F", "rho", "g_F"]
     return config
 
 
-def second_output_config(meta, mode, band):
-    """Output convention and fixed training scales for a single-band model."""
-    if mode == "relu":
-        return None
-    if mode not in SECOND_OUTPUTS:
-        raise ValueError(f"Unsupported second output {mode!r}; supported modes are {SECOND_OUTPUTS}")
-    band = str(band)
-    if band not in ("415", "58"):
-        raise ValueError("Linear and FSPL output modes require one frequency band")
-    lo, hi = map(float, meta["pathloss_range_db"])
-    frequency = float(meta["bands_hz"][band])
-    if not all(math.isfinite(v) for v in (lo, hi, frequency)) or hi <= lo or frequency <= 0:
-        raise ValueError("Output metadata requires finite, positive frequency and normalization scales")
-    return {**geometry_config(meta), "mode": mode, "band": band,
-            "frequency_hz": frequency, "pathloss_range_db": [lo, hi],
-            "quantity": "normalized_pathloss",
-            "normalization": "(pathloss_db-lo)/(hi-lo)",
-            "residual_units": "residual_db/(hi-lo)",
-            "fspl": {"formula": "20*log10(4*pi*d_m*frequency_hz/c_m_s)",
-                     "speed_of_light_m_s": 299792458.0,
-                     "minimum_distance_m": 1e-6, "computation_dtype": "float32"}}
-
-
-def checkpoint_output(checkpoint):
-    """Legacy output is ReLU; new checkpoints must carry exact output scales."""
-    saved = checkpoint.get("args", {})
-    mode = saved.get("second_output", "relu")
-    config = checkpoint.get("output_config")
-    if mode not in SECOND_OUTPUTS:
-        raise ValueError(f"Unknown checkpoint second_output={mode!r}")
-    if mode == "relu":
-        if config is not None:
-            raise ValueError("ReLU checkpoint must not contain output_config")
-        return mode, None
-    if config is None or config.get("version") != 1:
-        raise ValueError("Linear/FSPL checkpoint lacks a supported output_config")
-    band = config.get("band")
-    if saved.get("band", band) != band:
-        raise ValueError("Checkpoint band differs from output_config")
-    meta = {**config, "simulation": config,
-            "bands_hz": {band: config.get("frequency_hz")}}
-    if second_output_config(meta, mode, band) != config:
-        raise ValueError("Invalid checkpoint output_config")
-    return mode, config
+def cache_config_for_feature(meta, feature):
+    """LOS and Fresnel caches are independent, so legacy LOS stays reusable."""
+    if feature == "los":
+        return feature_config_for_mode(meta, "los")
+    if feature != "fresnel":
+        raise ValueError(f"Unsupported cached feature {feature!r}")
+    from los_features import fresnel_feature_config
+    return fresnel_feature_config(geometry_config(meta), meta["bands_hz"]["58"])
 
 
 def checkpoint_first_features(checkpoint):
@@ -139,12 +105,20 @@ def checkpoint_first_features(checkpoint):
 def checkpoint_features(checkpoint):
     """Legacy checkpoints use no features; expanded checkpoints must save scales."""
     checkpoint_first_features(checkpoint)
-    mode = checkpoint.get("args", {}).get("second_features", "none")
+    saved = checkpoint.get("args", {})
+    if saved.get("second_output", "relu") != "relu":
+        raise ValueError("This checkpoint uses an archived output mode; use the archived code")
+    mode = saved.get("second_features", "none")
     config = checkpoint.get("feature_config")
     if mode != "none":
         if config is None or config.get("version") != 1:
             raise ValueError("Geometry checkpoint lacks a supported feature_config")
-        expected = feature_config_for_mode({**config, "simulation": config}, mode)
+        meta = {**config, "simulation": config}
+        if mode == "los_distance_fresnel":
+            if str(saved.get("band", "58")) != "58" or not isinstance(config.get("fresnel"), dict):
+                raise ValueError("Fresnel checkpoint requires band 58 and its configuration")
+            meta["bands_hz"] = {"58": config["fresnel"].get("frequency_hz")}
+        expected = feature_config_for_mode(meta, mode)
         if expected != config:
             raise ValueError("Invalid checkpoint feature_config")
     elif config is not None:
@@ -156,7 +130,8 @@ def _append_los(model, args):
     import torch
 
     (input,) = args
-    expected = model.base_inputs + 1
+    fresnel_enabled = model.second_features == "los_distance_fresnel"
+    expected = model.base_inputs + (2 if fresnel_enabled else 1)
     if input.ndim != 4:
         raise ValueError("LOS input must be BxCxHxW")
     if input.shape[1] != expected:
@@ -164,63 +139,26 @@ def _append_los(model, args):
     with torch.no_grad():
         feature = input[:, model.base_inputs:model.base_inputs + 1]
         distance = torch.zeros_like(feature)
-        if model.second_features == "los_distance":
+        if model.second_features in ("los_distance", "los_distance_fresnel"):
             from los_features import log_distance_feature
             distance = log_distance_feature(input, model.feature_config)
         # firstU slices only base channels plus F when enabled; rho occupies
         # a previously zero secondU slot and is never supplied to firstU.
-        return (torch.cat((input, distance,
-                           torch.zeros_like(feature)), dim=1),)
+        fresnel = (input[:, -1:] if fresnel_enabled else torch.zeros_like(feature))
+        return (torch.cat((input[:, :model.base_inputs + 1], distance, fresnel), dim=1),)
 
 
-def _add_fspl(model, args, output):
-    from los_features import fspl_feature
-
-    (input,) = args
-    return [output[0], output[1] + fspl_feature(input, model.output_config)]
-
-
-def reset_second_output_head(model, seed):
-    """Same signed head for both paired modes, independent of global RNG use."""
-    import torch
-
-    head = model.Wconv_up000[0]
-    generator = torch.Generator(device="cpu").manual_seed(int(seed))
-    # This is Conv2d's default Kaiming-uniform(a=sqrt(5)) initialization.
-    bound = 1 / math.sqrt(head.in_channels * math.prod(head.kernel_size))
-    with torch.no_grad():
-        weight = torch.empty(head.weight.shape, dtype=head.weight.dtype, device="cpu")
-        weight.uniform_(-bound, bound, generator=generator)
-        head.weight.copy_(weight)
-        if head.bias is not None:
-            bias = torch.empty(head.bias.shape, dtype=head.bias.dtype, device="cpu")
-            bias.uniform_(-bound, bound, generator=generator)
-            head.bias.copy_(bias)
-    return {"seed": int(seed), "weights": ["Wconv_up000.0.weight", "Wconv_up000.0.bias"],
-            "initialization": "Conv2d_default_uniform_local_cpu_generator"}
-
-
-def load_model_state(model, checkpoint, initialize=False, reset_second_head=False,
-                     head_seed=None):
-    """Strict load, with explicit input and output migrations for init-from.
+def load_model_state(model, checkpoint, initialize=False):
+    """Strict load, allowing input additions only for init-from.
 
     Added channels are appended in all three input skips. Old columns and all
     biases are copied exactly; the added columns start at zero. LOS to distance
-    reuses the same weights and shapes. Resume never migrates feature modes.
-    ReLU to a signed output requires an explicit head reset; both experimental
-    modes use the same local seed while every other loaded parameter is kept.
+    reuses the same shapes. Fresnel reuses the last zero secondU slot and clears
+    only that input column; the prediction head is retained. Resume never
+    migrates feature modes.
     """
     source_first = checkpoint_first_features(checkpoint)
     source_mode, source_config = checkpoint_features(checkpoint)
-    source_output, source_output_config = checkpoint_output(checkpoint)
-    same_output = (source_output == model.second_output and
-                   source_output_config == model.output_config)
-    if reset_second_head and (not initialize or model.second_output == "relu" or head_seed is None):
-        raise ValueError("Head reset requires init-from, a signed output mode and an explicit seed")
-    migrate_output = (initialize and reset_second_head and source_output == "relu" and
-                      model.second_output in ("linear", "fspl_residual"))
-    if not same_output and not migrate_output:
-        raise ValueError("Checkpoint output mode/scales differ; init-from migration requires explicit head reset")
     target_first = model.first_features
     target_mode = model.second_features
     same = (source_first == target_first and source_mode == target_mode and
@@ -228,18 +166,25 @@ def load_model_state(model, checkpoint, initialize=False, reset_second_head=Fals
     first_added = source_first == "none" and target_first == "los"
     second_added = source_mode == "none" and target_mode in ("los", "los_distance")
     distance_added = source_mode == "los" and target_mode == "los_distance"
+    fresnel_added = source_mode == "los_distance" and target_mode == "los_distance_fresnel"
     source_matches_los = False
     if distance_added:
         source_matches_los = source_config == feature_config_for_mode(
             {**model.feature_config, "simulation": model.feature_config}, "los")
+    source_matches_distance = False
+    if fresnel_added:
+        source_matches_distance = source_config == feature_config_for_mode(
+            {**model.feature_config, "simulation": model.feature_config}, "los_distance")
     compatible = ((source_first == target_first or first_added) and
-                  (source_mode == target_mode or second_added or distance_added) and
-                  (source_config == model.feature_config or second_added or source_matches_los))
+                  (source_mode == target_mode or second_added or distance_added or fresnel_added) and
+                  (source_config == model.feature_config or second_added or source_matches_los or
+                   source_matches_distance))
     migrate = initialize and not same and compatible
     if not same and not migrate:
         raise ValueError("Checkpoint feature mode/scales differ; resume and evaluation require an exact match")
     state = checkpoint["model"]
     padded_names = []
+    zeroed_names = []
     if migrate:
         state = state.copy()
         expected = model.state_dict()
@@ -256,14 +201,19 @@ def load_model_state(model, checkpoint, initialize=False, reset_second_head=Fals
                 padded[:, :old.shape[1]] = old
                 state[name] = padded
                 padded_names.append(name)
+        if fresnel_added:
+            for name in _SECOND_WEIGHTS:
+                if state[name].shape != expected[name].shape:
+                    raise ValueError(f"Unexpected source weight shape for {name}: {tuple(state[name].shape)}")
+                state[name] = state[name].clone()
+                state[name][:, -1].zero_()
+                zeroed_names.append(name)
     model.load_state_dict(state, strict=True)
-    head_reset = reset_second_output_head(model, head_seed) if reset_second_head else None
     return {"source_mode": source_mode, "target_mode": target_mode,
             "source_first_features": source_first,
             "target_first_features": target_first,
             "zero_padded_weights": padded_names, "distance_added": distance_added,
-            "source_second_output": source_output, "target_second_output": model.second_output,
-            "second_head_reset": head_reset}
+            "fresnel_added": fresnel_added, "zeroed_fresnel_weights": zeroed_names}
 
 
 def load_module():
@@ -303,47 +253,39 @@ def _expand_inputs(model, names, added):
 
 
 def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=None,
-              first_features="none", second_output="relu", output_config=None):  # noqa: N802
-    """Build the upstream model with input features and optional signed output.
+              first_features="none"):  # noqa: N802
+    """Build the upstream model with optional secondU distance/Fresnel inputs.
 
     State keys and the upstream forward remain unchanged. A both-stage model
     expands firstU's three input convolutions by one channel, preserving hidden
     widths even for band=both. Distance uses an existing zero secondU slot, so
-    its parameter count matches LOS. Feature preparation takes O(BHW) time and
-    extra memory. At inputs=2, firstU adds only 579 parameters.
+    its parameter count matches LOS; Fresnel occupies the final zero slot.
+    Per-batch cached inputs and distance take O(BHW) time and extra memory.
+    At inputs=2, firstU adds only 579 parameters.
     """
     checkpoint_first_features({"args": {"first_features": first_features,
                                         "second_features": second_features}})
     if second_features != "none" and inputs < 2:
         raise ValueError("LOS requires height and TX input channels")
+    if second_features == "los_distance_fresnel" and inputs != 2:
+        raise ValueError("Fresnel inputs support only the single 5.8 GHz band")
     if second_features != "none":
         checkpoint_features({"args": {"first_features": first_features,
                                       "second_features": second_features},
                              "feature_config": feature_config})
     elif feature_config is not None:
         raise ValueError("feature_config is only used by expanded models")
-    checkpoint_output({"args": {"second_output": second_output},
-                       "output_config": output_config})
-    if second_output != "relu" and inputs != 2:
-        raise ValueError("Linear/FSPL output modes require single-band height and TX inputs")
     model = load_module().RadioWNet(inputs=inputs, phase=phase)
     model.base_inputs = inputs
     model.first_features = first_features
     model.second_features = second_features
     model.feature_config = feature_config
-    model.second_output = second_output
-    model.output_config = output_config
     if first_features == "los":
         _expand_inputs(model, ("layer00", "conv_up00", "conv_up000"), 1)
         model.inputs = inputs + 1
     if second_features != "none":
         _expand_inputs(model, ("Wlayer00", "Wconv_up00", "Wconv_up000"), 3)
         model.register_forward_pre_hook(_append_los)
-    if second_output != "relu":
-        from torch import nn
-        model.Wconv_up000[1] = nn.Identity()
-    if second_output == "fspl_residual":
-        model.register_forward_hook(_add_fspl)
     return model
 
 
