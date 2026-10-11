@@ -76,7 +76,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels 
-from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
+from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES, SECOND_ARCHITECTURES,
                        feature_config_for_mode, load_model_state)
 from experiment_provenance import collect_provenance
 
@@ -199,6 +199,10 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
 
 
 def main(args):
+    if args.second_architecture == "pmnet" and args.phase != "secondU":
+        raise ValueError("--second-architecture pmnet trains only secondU with a frozen firstU")
+    if args.second_architecture == "pmnet" and not (args.init_from or args.resume):
+        raise ValueError("PMNet requires --init-from <trained-firstU.pt> or --resume")
     if args.first_features == "los" and args.second_features == "none":
         raise ValueError("--first-features los requires LOS secondU features")
     if args.second_features != "none" and args.first_features == "none" and args.phase == "firstU":
@@ -210,6 +214,10 @@ def main(args):
     device = torch.device(args.device)
 
     train_loader, val_loader, ds = make_loaders(ld, args)
+    if args.second_architecture == "pmnet":
+        if args.batch_size < 2 or len(ds) < 2 or len(ds) % args.batch_size == 1:
+            raise ValueError("PMNet image-pooling BatchNorm requires at least two samples in every training batch; "
+                             "the loader retains the final batch")
 
     # dB per unit of normalized target so RMSE is reported in real units
     lo, hi = ds.pl_min, ds.pl_max
@@ -220,10 +228,11 @@ def main(args):
     feature_config = feature_config_for_mode(ds.meta, args.second_features)
     model = RadioWNet(inputs=in_ch, phase=args.phase,
                      second_features=args.second_features, feature_config=feature_config,
-                     first_features=args.first_features).to(device)
+                     first_features=args.first_features,
+                     second_architecture=args.second_architecture).to(device)
     
     for pname, prm in model.named_parameters():
-        prm.requires_grad_(trains_in_phase(pname, args.phase))
+        prm.requires_grad_(trains_in_phase(pname, args.phase, args.second_architecture))
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in model.parameters())
     print(f"trainable params {n_train:,} / {n_total:,} ({args.phase} half)")
@@ -261,6 +270,8 @@ def main(args):
             checkpoint_sources["resume"] = path
             weight_loading = load_model_state(model, ck)
             opt.load_state_dict(ck["opt"])
+            if "scaler" in ck:
+                scaler.load_state_dict(ck["scaler"])
 
             prev_sched = ck.get("lr_sched", "step")
             prev_len = ck["sched"].get("T_max") if args.lr_sched == "cosine" else None
@@ -304,6 +315,8 @@ def main(args):
               f"epoch {ck.get('epoch')}, best {ck.get('best', float('nan')):.4f} dB); "
               f"optimizer and LR schedule start fresh")
     elif args.phase == "secondU" and not resumed:
+        if args.second_architecture == "pmnet":
+            raise ValueError("PMNet requires a trained firstU checkpoint; no initialization or resume was loaded")
         print("warning: training secondU from random init -- the frozen first "
               "U-Net is untrained, so its output is noise. Pass --init-from "
               "<firstU checkpoint>.")
@@ -313,6 +326,9 @@ def main(args):
     provenance["second_features"] = args.second_features
     provenance["feature_config"] = feature_config
     provenance["weight_loading"] = weight_loading
+    provenance["second_architecture"] = args.second_architecture
+    provenance["model_config"] = getattr(model, "model_config", None)
+    provenance["parameters"] = {"trainable": n_train, "total": n_total}
     # On resume retain the original initialization record as well.
     prov_path = os.path.join(args.out, f"{args.run_name}_provenance.json")
     if resumed and os.path.exists(prov_path):
@@ -329,7 +345,8 @@ def main(args):
 
     print(f"training {args.run_name}: band={args.band} loss={args.loss} "
           f"phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
-          f"first_features={args.first_features} second_features={args.second_features}")
+          f"first_features={args.first_features} second_features={args.second_features} "
+          f"second_architecture={args.second_architecture}")
 
     hist_cols = None
     for epoch in range(start_epoch, args.epochs):
@@ -400,8 +417,10 @@ def main(args):
         sel = metrics["val/rmse_db_masked"]
         state = {"model": model.state_dict(), "opt": opt.state_dict(),
                  "sched": sched.state_dict(), "lr_sched": args.lr_sched,
-                 "epoch": epoch, "best": best, "args": vars(args),
-                 "metrics": metrics, "feature_config": feature_config}
+                 "scaler": scaler.state_dict(),
+                 "epoch": epoch, "best": min(best, sel), "args": vars(args),
+                 "metrics": metrics, "feature_config": feature_config,
+                 "model_config": getattr(model, "model_config", None)}
         torch.save(state, ckpt_last)
         if sel < best:
             best = sel
@@ -413,6 +432,9 @@ def main(args):
         json.dump({"run": args.run_name, "band": args.band, "loss": args.loss,
                    "phase": args.phase, "init_from": args.init_from,
                    "first_features": args.first_features,
+                   "second_architecture": args.second_architecture,
+                   "model_config": getattr(model, "model_config", None),
+                   "parameters": {"trainable": n_train, "total": n_total},
                    "second_features": args.second_features, "feature_config": feature_config,
                    "selection_metric": "val/rmse_db_masked",
                    "best": best, "epochs": args.epochs}, f, indent=2)
@@ -432,6 +454,8 @@ def build_parser():
                         "fill too and is kept only as an ablation; either way the "
                         "run is selected and ranked on valid pixels.")
     p.add_argument("--phase", default="firstU", choices=["firstU", "secondU"])
+    p.add_argument("--second-architecture", default="radiounet", choices=SECOND_ARCHITECTURES,
+                   help="refinement backbone; pmnet trains only secondU and copies only firstU from RadioUNet")
     p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,
                    help="append cached LOS clearance F to firstU; requires LOS secondU features")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
@@ -483,6 +507,8 @@ if __name__ == "__main__":
             a.run_name += "_los_both" if a.first_features == "los" else "_los"
         elif a.second_features == "los_distance":
             a.run_name += "_los_distance_both" if a.first_features == "los" else "_los_distance"
+        if a.second_architecture != "radiounet":
+            a.run_name += "_" + a.second_architecture
     # The second stage is useless on top of a random first U-Net, so it seeds
     # itself from the firstU run by default; "none" is the explicit opt-out.
     if a.init_from is None and a.phase == "secondU":

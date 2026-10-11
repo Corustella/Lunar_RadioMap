@@ -1,7 +1,7 @@
 """
 Access to the RadioUNet model code.
 
-The RadioWNet architecture is not reimplemented here. The authors' model code is
+The default RadioWNet architecture is not reimplemented here. The authors' model code is
 included unmodified under ``RadioUNet/modules.py`` this module is the seam between that
 file and the rest of the baseline.
 
@@ -14,6 +14,8 @@ without torch; the import only happens when a model is actually built.
 ``RadioWNet(inputs, phase)`` returns ``[out1, out2]`` from its forward pass.
 ``phase="firstU"`` puts gradients on the first U-Net and detaches the
 refinement; anything else detaches the first and trains the refinement.
+The optional ``second_architecture="pmnet"`` retains only the frozen firstU
+and uses the PMNet adapter in ``pmnet.py`` for refinement.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ https://github.com/RonLevie/RadioUNet"""
 _cached = None
 FIRST_FEATURES = ("none", "los")
 SECOND_FEATURES = ("none", "los", "los_distance")
+SECOND_ARCHITECTURES = ("radiounet", "pmnet")
 _FIRST_WEIGHTS = ("layer00.0.weight", "conv_up00.0.weight",
                   "conv_up000.0.weight")
 _SECOND_WEIGHTS = ("Wlayer00.0.weight", "Wconv_up00.0.weight",
@@ -89,6 +92,14 @@ def checkpoint_first_features(checkpoint):
     return first
 
 
+def checkpoint_architecture(checkpoint):
+    """Old checkpoints contain the original RadioUNet refinement."""
+    architecture = checkpoint.get("args", {}).get("second_architecture", "radiounet")
+    if architecture not in SECOND_ARCHITECTURES:
+        raise ValueError(f"Unknown checkpoint second_architecture={architecture!r}")
+    return architecture
+
+
 def checkpoint_features(checkpoint):
     """Legacy checkpoints use no features; expanded checkpoints must save scales."""
     checkpoint_first_features(checkpoint)
@@ -129,16 +140,40 @@ def _append_los(model, args):
 
 
 def load_model_state(model, checkpoint, initialize=False):
-    """Strict load, allowing LOS/distance input additions only for init-from.
+    """Strict load, allowing feature or architecture changes only for init-from.
 
     Added channels are appended in all three input skips. Old columns and all
     biases are copied exactly; the added columns start at zero. LOS to distance
     reuses the same weights and shapes. Resume never migrates feature modes.
+    RadioUNet to PMNet copies only the identical firstU, leaving PMNet random.
     """
     source_first = checkpoint_first_features(checkpoint)
     source_mode, source_config = checkpoint_features(checkpoint)
+    source_arch = checkpoint_architecture(checkpoint)
+    target_arch = model.second_architecture
     target_first = model.first_features
     target_mode = model.second_features
+    if source_arch != target_arch:
+        if not (initialize and source_arch == "radiounet" and target_arch == "pmnet"):
+            raise ValueError("Checkpoint architecture differs; only init-from RadioUNet to PMNet is supported")
+        if source_first != target_first:
+            raise ValueError("PMNet initialization requires an identical trained firstU input mode")
+        if target_first == "los":
+            source_los = feature_config_for_mode({**source_config, "simulation": source_config}, "los")
+            target_los = feature_config_for_mode(
+                {**model.feature_config, "simulation": model.feature_config}, "los")
+            if source_los != target_los:
+                raise ValueError("PMNet initialization requires identical firstU LOS geometry")
+        first_state = {name: value for name, value in checkpoint["model"].items()
+                       if not name.startswith("W")}
+        model.first.load_state_dict(first_state, strict=True)
+        return {"source_architecture": source_arch, "target_architecture": target_arch,
+                "source_first_features": source_first, "target_first_features": target_first,
+                "source_mode": source_mode, "target_mode": target_mode,
+                "first_only": True, "second_initialization": "random",
+                "source_epoch": checkpoint.get("epoch"), "source_best": checkpoint.get("best")}
+    if source_arch == "pmnet" and checkpoint.get("model_config") != model.model_config:
+        raise ValueError("PMNet checkpoint model_config differs or is missing")
     same = (source_first == target_first and source_mode == target_mode and
             source_config == model.feature_config)
     first_added = source_first == "none" and target_first == "los"
@@ -151,7 +186,7 @@ def load_model_state(model, checkpoint, initialize=False):
     compatible = ((source_first == target_first or first_added) and
                   (source_mode == target_mode or second_added or distance_added) and
                   (source_config == model.feature_config or second_added or source_matches_los))
-    migrate = initialize and not same and compatible
+    migrate = initialize and not same and compatible and target_arch == "radiounet"
     if not same and not migrate:
         raise ValueError("Checkpoint feature mode/scales differ; resume and evaluation require an exact match")
     state = checkpoint["model"]
@@ -173,7 +208,8 @@ def load_model_state(model, checkpoint, initialize=False):
                 state[name] = padded
                 padded_names.append(name)
     model.load_state_dict(state, strict=True)
-    return {"source_mode": source_mode, "target_mode": target_mode,
+    return {"source_architecture": source_arch, "target_architecture": target_arch,
+            "source_mode": source_mode, "target_mode": target_mode,
             "source_first_features": source_first,
             "target_first_features": target_first,
             "zero_padded_weights": padded_names, "distance_added": distance_added}
@@ -216,15 +252,17 @@ def _expand_inputs(model, names, added):
 
 
 def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=None,
-              first_features="none"):  # noqa: N802
+              first_features="none", second_architecture="radiounet"):  # noqa: N802
     """Build the upstream model with LOS and optional secondU log-distance.
 
-    State keys and the upstream forward remain unchanged. A both-stage model
+    By default state keys and the upstream forward remain unchanged. A both-stage model
     expands firstU's three input convolutions by one channel, preserving hidden
     widths even for band=both. Distance uses an existing zero secondU slot, so
     its parameter count matches LOS. Feature preparation takes O(BHW) time and
     extra memory. At inputs=2, firstU adds only 579 parameters.
     """
+    if second_architecture not in SECOND_ARCHITECTURES:
+        raise ValueError(f"Unknown second_architecture={second_architecture!r}")
     checkpoint_first_features({"args": {"first_features": first_features,
                                         "second_features": second_features}})
     if second_features != "none" and inputs < 2:
@@ -236,20 +274,26 @@ def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=N
     elif feature_config is not None:
         raise ValueError("feature_config is only used by expanded models")
     model = load_module().RadioWNet(inputs=inputs, phase=phase)
+    if first_features == "los":
+        _expand_inputs(model, ("layer00", "conv_up00", "conv_up000"), 1)
+        model.inputs = inputs + 1
+    if second_architecture == "pmnet":
+        from pmnet import RadioPMNet
+        second_inputs = inputs + 1 + (3 if second_features != "none" else 0)
+        model = RadioPMNet(model, second_inputs)
+    elif second_features != "none":
+        _expand_inputs(model, ("Wlayer00", "Wconv_up00", "Wconv_up000"), 3)
     model.base_inputs = inputs
     model.first_features = first_features
     model.second_features = second_features
     model.feature_config = feature_config
-    if first_features == "los":
-        _expand_inputs(model, ("layer00", "conv_up00", "conv_up000"), 1)
-        model.inputs = inputs + 1
+    model.second_architecture = second_architecture
     if second_features != "none":
-        _expand_inputs(model, ("Wlayer00", "Wconv_up00", "Wconv_up000"), 3)
         model.register_forward_pre_hook(_append_los)
     return model
 
 
-def trains_in_phase(param_name, phase):
+def trains_in_phase(param_name, phase, second_architecture="radiounet"):
     """Whether a parameter belongs to the half that ``phase`` trains.
 
     The forward pass detaches the other half, so those parameters get no
@@ -258,6 +302,13 @@ def trains_in_phase(param_name, phase):
     still handed every parameter, which keeps its ``state_dict`` layout identical
     across the two stages so a checkpoint stays resumable either way.
 
-    Every layer of the refinement half is named with a leading ``W``.
+    Upstream refinement layers start with ``W``; PMNet parameters are explicitly
+    grouped under ``refiner.`` and only secondU training is supported there.
     """
+    if second_architecture == "pmnet":
+        if phase != "secondU":
+            raise ValueError("PMNet trains only secondU; firstU is always frozen")
+        return param_name.startswith("refiner.")
+    if second_architecture != "radiounet":
+        raise ValueError(f"Unknown second_architecture={second_architecture!r}")
     return param_name.startswith("W") if phase == "secondU" else not param_name.startswith("W")

@@ -216,6 +216,81 @@ for seed in 0 1; do
 done
 ```
 
+### PMNet secondU: single seed 0 screening run
+
+`--second-architecture pmnet` replaces only the refinement network. It copies
+the existing LoS firstU weights exactly, keeps firstU frozen and in evaluation
+mode, and initializes PMNet randomly. It does not execute or retain the old
+secondU. The input remains `[out1, height, TX, F, rho, 0]`; no new feature,
+loss, augmentation or normalization is introduced. Old checkpoints still
+default to the original RadioUNet architecture.
+
+**Rationale and limits.** The current secondU compresses deep features to 4x4.
+The [PMNet ICASSP 2023 paper](https://wides.usc.edu/Updated_pdf/PMNet:%20Large-Scale%20Channel%20Prediction%20System%20for%20ICASSP%202023%20First%20Pathloss%20Radio%20Map%20Prediction%20Challenge.pdf)
+reports an improvement with output stride 8 rather than 16 on urban radio maps.
+[RadioLunaDiff](https://arxiv.org/html/2509.14559v1) also reports a stronger PMNet
+than RadioUNet on lunar maps, but its metric is not established as the current
+official masked metric. These support testing a backbone with finer deep
+features; improvement of this frozen-firstU refinement is an **unverified
+research hypothesis**. One seed with a new random secondU is a screening run,
+not an isolated causal comparison against the historical trained initialization.
+
+`pmnet.py` follows the author's
+[PMNet v3](https://github.com/abman23/pmnet/blob/a0e0c5926de721074beeb23f630f2d313f6508dd/models/pmnet_v3.py)
+and training configuration at revision `a0e0c5926de721074beeb23f630f2d313f6508dd`:
+blocks `[3,3,27,3]`, ASPP rates `[6,12,18]`, multi-grids `[1,2,4]`, stride 8.
+The explicit adaptations are the six-channel stem and raw-input skip, the
+original **2x2** stem pool independent of channel count, PyTorch BatchNorm2d
+(the author's fallback), and the existing direct prediction plus ReLU instead
+of the author's linear output. Author BN momenta and padding are preserved;
+the deepest feature map is 33x33 for a 256x256 input. No new dependencies.
+
+PMNet secondU has **33,355,201** parameters, versus 2,354,741 for the current
+secondU; frozen firstU has 10,921,984, for a total of 44,277,185. Capacity and
+compute therefore change along with the architecture. Convolution cost is
+`O(B sum_l H_l W_l k_l^2 C_in,l C_out,l)`; stored activations scale as
+`O(B sum_l H_l W_l C_l)`, plus parameters, gradients and Adam state. Actual
+runtime and memory depend on the GPU. Use this run's first complete epoch to
+estimate the 150-epoch budget, rather than assuming the old secondU timing.
+
+Run **only the following seed 0 secondU training**, then evaluate its best
+checkpoint on the full fixed val. This deliberately overrides the usual
+two-seed protocol for initial screening. Reuse the existing firstU and LOS
+cache. Activate the server's existing training environment first. Keep batch
+16: PMNet's pooled BatchNorm needs at least two samples per training batch;
+the standard 25,720-sample training set leaves eight in the final batch.
+Do not silently substitute gradient accumulation, which changes BN behavior.
+
+```bash
+set -e
+out_root=runs/pmnet_second_v1
+mkdir "$out_root"
+python train.py --data-root ~/liuanda/LunarRM --los-cache results/los_cache_v1 \
+  --band 58 --phase secondU --second-architecture pmnet --loss masked \
+  --first-features los --second-features los_distance \
+  --init-from runs/los_both_v1/seed0/firstU/radiownet_58_masked_firstU_los_both_best.pt \
+  --seed 0 --epochs 150 --batch-size 16 \
+  --lr 1e-4 --lr-sched cosine --lr-min 1e-6 --clip 0 \
+  --amp --device cuda --num-workers 8 --panels 0 \
+  --out "$out_root/seed0/secondU" \
+  --run-name pmnet_58_masked_secondU_los_distance_both
+python evaluate.py --data-root ~/liuanda/LunarRM --los-cache results/los_cache_v1 \
+  --ckpt "$out_root/seed0/secondU/pmnet_58_masked_secondU_los_distance_both_best.pt" \
+  --band 58 --phase secondU --split val --batch-size 16 \
+  --amp --device cuda --num-workers 8 --panels 0 \
+  --out "$out_root/seed0/secondU/val.json"
+```
+
+`mkdir` intentionally rejects an existing experiment directory. To resume this
+same run after interruption, repeat only its training command with
+`--resume auto`, the same output/name and all the same settings; then evaluate.
+Do not create a second seed or rerun firstU. Checkpoints contain both networks,
+BN buffers and the versioned PMNet configuration, so evaluation needs no
+architecture flag or original firstU file. Provenance records the actual
+dataset loader, source checkpoint, code version, environment and parameter
+counts. Compare `summary.rmse_db_masked` in `val.json`; masked MSE in dB squared
+is its square. Training history records each epoch's time and full-val metric.
+
 ---
 
 ## Submitting
@@ -251,6 +326,8 @@ python score_submission.py --submission <dir> --data-root <data> --band both --v
 - **This code:** MIT - see `LICENSE`.
 - **`RadioUNet/`:** MIT, Copyright (c) 2019 Ron Levie. Unmodified upstream model
   code; see `RadioUNet/README.md` for the source and citation.
+- **`pmnet.py`:** adapted PMNet code, MIT, Copyright (c) 2023 Juhyung Lee;
+  firstU forward adapter, Copyright (c) 2019 Ron Levie. Notices are in the file.
 - **The dataset:** CC BY 4.0, distributed via Kaggle.
 
 If you modify or redistribute that model code, keep its MIT notice intact.

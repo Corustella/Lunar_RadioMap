@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels, ssim  
 from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features, feature_config_for_mode,
-                       load_model_state)  # noqa: E402
+                       checkpoint_architecture, load_model_state)  # noqa: E402
 
 BANDS = ("415", "58")
 
@@ -115,8 +115,10 @@ def main(args):
     in_ch = 3 if band == "both" else 2
     second_features, feature_config = checkpoint_features(ck)
     first_features = checkpoint_first_features(ck)
+    second_architecture = checkpoint_architecture(ck)
     model = RadioWNet(inputs=in_ch, phase=phase, second_features=second_features,
-                     feature_config=feature_config, first_features=first_features).to(device)
+                     feature_config=feature_config, first_features=first_features,
+                     second_architecture=second_architecture).to(device)
     load_model_state(model, ck)
     model.eval()
     print(f"loaded {args.ckpt} (epoch {ck.get('epoch')}, band {band}, phase {phase}, "
@@ -221,6 +223,8 @@ def main(args):
     summary = {"checkpoint": args.ckpt, "split": args.split, "band": band,
                "phase": phase, "epoch": ck.get("epoch"), "samples": len(per_sample),
                "first_features": first_features, "second_features": second_features,
+               "second_architecture": second_architecture,
+               "model_config": getattr(model, "model_config", None),
                "feature_config": feature_config,
                "official_metric": "rmse_db_masked" if need_mask else None}
     summary.update(accs["all"].compute())
