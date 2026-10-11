@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels, ssim  
 from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features, feature_config_for_mode,
-                       cache_config_for_feature, load_model_state)  # noqa: E402
+                       load_model_state)  # noqa: E402
 
 BANDS = ("415", "58")
 
@@ -146,14 +146,7 @@ def main(args):
         # Distance is constructed from augmented inputs in the model. The
         # existing cache contains F only and keeps its original metadata.
         cache_config = feature_config_for_mode(base.meta, "los")
-        fresnel = {}
-        if second_features == "los_distance_fresnel":
-            fresnel_root = args.fresnel_cache or saved.get("fresnel_cache")
-            if not fresnel_root:
-                raise ValueError("Fresnel evaluation requires --fresnel-cache")
-            fresnel = dict(fresnel_cache=fresnel_root,
-                           fresnel_config=cache_config_for_feature(base.meta, "fresnel"))
-        base = LOSDataset(base, cache_root, cache_config, **fresnel)
+        base = LOSDataset(base, cache_root, cache_config)
     lo, hi = base.pl_min, base.pl_max
     scale = float(hi - lo)
     ds = ScoredSet(base, lo, hi, need_mask)
@@ -277,7 +270,6 @@ def build_parser():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data-root", default="LunarRM")
     p.add_argument("--los-cache", default=None, help="LOS cache; defaults to the checkpoint's cache path")
-    p.add_argument("--fresnel-cache", default=None, help="Fresnel cache; defaults to the checkpoint's cache path")
     p.add_argument("--split", default="val", choices=["val", "test"])
     p.add_argument("--band", default=None, choices=["415", "58", "both"],
                    help="defaults to the band the checkpoint was trained on")

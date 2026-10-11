@@ -77,7 +77,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels 
 from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
-                       feature_config_for_mode, cache_config_for_feature, load_model_state)
+                       feature_config_for_mode, load_model_state)
 from experiment_provenance import collect_provenance
 
 
@@ -130,15 +130,9 @@ def make_loaders(ld, args):
         if not args.los_cache:
             raise ValueError("LOS inputs require --los-cache")
         config = feature_config_for_mode(train_ds.meta, "los")
-        fresnel = {}
-        if args.second_features == "los_distance_fresnel":
-            if not args.fresnel_cache:
-                raise ValueError("Fresnel inputs require --fresnel-cache")
-            fresnel = dict(fresnel_cache=args.fresnel_cache,
-                           fresnel_config=cache_config_for_feature(train_ds.meta, "fresnel"))
         train_ds = LOSDataset(train_ds, args.los_cache, config,
-                              augment=not args.no_augment, augmentation=ld._augment, **fresnel)
-        val_ds = LOSDataset(val_ds, args.los_cache, config, **fresnel)
+                              augment=not args.no_augment, augmentation=ld._augment)
+        val_ds = LOSDataset(val_ds, args.los_cache, config)
     print(f"samples: {len(train_ds)} train / {len(val_ds)} val")
 
     dl = dict(batch_size=args.batch_size, num_workers=args.num_workers,
@@ -209,13 +203,8 @@ def main(args):
         raise ValueError("--first-features los requires LOS secondU features")
     if args.second_features != "none" and args.first_features == "none" and args.phase == "firstU":
         raise ValueError("LOS firstU training requires --first-features los")
-    if args.second_features in ("los_distance", "los_distance_fresnel") and args.phase != "secondU":
-        raise ValueError("Distance/Fresnel inputs train only secondU; initialize from a trained checkpoint")
-    if args.second_features == "los_distance_fresnel":
-        if args.band != "58":
-            raise ValueError("Fresnel inputs currently require --band 58")
-        if not args.init_from and not args.resume:
-            raise ValueError("Fresnel training requires --init-from a distance checkpoint or --resume")
+    if args.second_features == "los_distance" and args.phase != "secondU":
+        raise ValueError("--second-features los_distance trains only secondU; initialize from a LOS firstU checkpoint")
     ld = load_dataset_module(args.data_root)
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -315,8 +304,6 @@ def main(args):
               f"epoch {ck.get('epoch')}, best {ck.get('best', float('nan')):.4f} dB); "
               f"optimizer and LR schedule start fresh")
     elif args.phase == "secondU" and not resumed:
-        if args.second_features == "los_distance_fresnel":
-            raise ValueError("Fresnel training requires an existing initialization or resume checkpoint")
         print("warning: training secondU from random init -- the frozen first "
               "U-Net is untrained, so its output is noise. Pass --init-from "
               "<firstU checkpoint>.")
@@ -448,9 +435,8 @@ def build_parser():
     p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,
                    help="append cached LOS clearance F to firstU; requires LOS secondU features")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
-                   help="secondU inputs: none, los [F,0,0], los_distance [F,rho,0], or los_distance_fresnel [F,rho,gF]")
+                   help="secondU inputs: none, los [F,0,0], or los_distance [F,rho,0]")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
-    p.add_argument("--fresnel-cache", default=None, help="separate cache built with build_los_cache.py --feature fresnel")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -497,8 +483,6 @@ if __name__ == "__main__":
             a.run_name += "_los_both" if a.first_features == "los" else "_los"
         elif a.second_features == "los_distance":
             a.run_name += "_los_distance_both" if a.first_features == "los" else "_los_distance"
-        elif a.second_features == "los_distance_fresnel":
-            a.run_name += "_fresnel_both" if a.first_features == "los" else "_fresnel"
     # The second stage is useless on top of a random first U-Net, so it seeds
     # itself from the firstU run by default; "none" is the explicit opt-out.
     if a.init_from is None and a.phase == "secondU":
