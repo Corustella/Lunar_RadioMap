@@ -1,7 +1,7 @@
 # 单次漫反射物理特征：轻量输入与参考实现
 
-日期：2026-10-14。新增轻量构造器；原精确双线性求交版作为物理参照保留。
-本次不修改 LOS/distance、模型、checkpoint、损失、训练流程或原始数据。
+日期：2026-10-14。轻量构造器已接入两阶段训练、评估及权重迁移；
+原精确双线性求交版作为物理参照保留。LOS/distance 定义、损失和原始数据不变。
 
 ## 轻量输入与 500 ms 计时口径
 
@@ -64,8 +64,8 @@ G=C\frac{S^2}{\pi}\left[
 曾测到仅特征 138 ms，但完整链环境下明显更慢；没有用较快值替代失败记录。
 
 `LightDiffuse(config).feature(raw_height, tx)` 返回设备上的 `[1,1,H,W]` FP32 张量，
-适合后续输入拼接；`.feature_numpy` 仅供离线缓存。训练脚本尚未增加新特征模式，
-不能把轻量缓存当作 LOS 缓存、不能用旧 checkpoint 直接恢复新输入训练。
+用于在线输入拼接；`.feature_numpy` 供离线缓存。训练使用独立的 F/B 缓存，
+通过 `--init-from` 迁移旧 LoS 权重；旧 checkpoint 不能直接 `--resume` 新输入。
 
 在现有 PyTorch 环境中同步代码后，可先预检（不写缓存）：
 
@@ -93,6 +93,108 @@ python benchmark_physical_inputs.py \
 
 checkpoint 路径需替换为服务器实际存在的 LOS-distance 文件；这里没有声称已访问服务器。
 输出 JSON 分别保存静态初始化、首次热身、特征耗时和含/不含读盘的完整预算，拒绝覆盖已有报告。
+
+## 正式两阶段协议：32×32 RX，seed 0/1
+
+用户确认服务器上漫反射构造约 10 ms，但这是特征单项时间，未据此声称整体达标。
+因此正式候选提高到 **32×32 RX、每中心 4×16 方向**，先在服务器做完整预算检查；
+底层构造器的默认 16×16 保留，所有正式命令显式指定 32，不依赖默认值。
+
+- firstU 输入 `[H,TX,F,B]`，从对应 seed 的旧 LoS firstU best 初始化并重新训练。
+- secondU 输入顺序为 `[out1,H,TX,F,B,rho]`，从本轮 firstU best 初始化，冻结这个新 firstU。
+- 每阶段 150 轮；batch 16、Adam lr=1e-4、cosine/min=1e-6、clip=0、AMP、原 D4、masked MSE。
+  不加 TTA/集成；按固定 val 的有效像素 pooled RMSE 选择 best。
+- 不改变隐藏层宽度；firstU 比 LoS 增加 579 个参数。所有新增 B 输入列初始化为零。
+  secondU 的旧 rho 列移动到新 rho 位置，B 列清零；不能按形状相同直接加载旧权重。
+- checkpoint 保存完整物理和数值配置，训练/评估拒绝错误频段、网格或未完成缓存。
+  缓存中 H、TX、F、B、target、mask 共同执行原有 D4，distance 从增强后输入构造。
+
+**依据边界：** 材质与单次散射公式来自上面的官方实现；轻量特征可训练性是本地代码检查结果。
+32×32 减少粗网格插值平滑、以及是否改善泛化/边界 RMSE，均为待验证研究假设。
+LoS 初始化后增加 firstU 训练轮数也可能影响结果，本轮不能把全部变化单独归因于 B。
+
+本地检查已通过 LoS seed0/1 及 LoS-distance 权重迁移（测试输入两路输出最大差均为 0）、
+新增 B 列反向梯度、共同增强和缓存拒绝检查。rx32 两个合成样本、每阶段一个 batch 的
+CPU 烟雾测试通过 firstU→secondU→评估→恢复，确认 secondU 训练没有改变 firstU 权重。
+这些不是正式训练或 RMSE 结论。新结构零初始化 B 和烟雾 checkpoint 的在线计时入口
+也已跑通；本机单张真实输入预热后分别约 569/557 ms，均超过 500 ms。
+因此 rx32 是否适用须由服务器完整计时决定，不能用其单项 10 ms 替代。
+
+先在现有 PyTorch 环境中同步代码，使用旧 LOS-distance checkpoint 零初始化 B 通道，
+对**新四通道模型结构**做未缓存的完整链路计时。只在内存中迁移，不写模型权重，不训练：
+
+```bash
+cd ~/liuanda/lunar-radiomap-challenge
+git status
+git switch main
+git pull --ff-only
+python benchmark_physical_inputs.py \
+  --data-root ~/liuanda/LunarRM \
+  --ckpt runs/los_distance_v1/seed0/secondU/radiownet_58_masked_secondU_los_distance_both_best.pt \
+  --initialize-diffuse \
+  --split val --indices 0 200 400 600 800 1000 1200 1400 1600 1800 2000 2329 \
+  --repeats 2 --rx-grid 32 --n-mu 4 --n-phi 16 --ray-chunk 8192 \
+  --out results/diffuse_light_rx32_pretrain_budget.json
+```
+
+关注 `summary.total_ms_including_input_read` 的 mean/p95/max，不能只看 `light_ms`。
+建议此小样本 max 留到约 350 ms 以内；这是给复杂地形和硬件波动留余量的工程门槛，
+不是官方指标，也不保证全量尾延迟。若超过门槛，先保留报告并重新讨论网格配置，勿直接全量训练。
+报告会分别标明零初始化预训练计时、旧模型成本估计、真正训练后的漫反射模型。
+
+确认完整预算有余量后，再执行以下正式命令。B 的完整 train/val 缓存约 7.35 GB；
+F 缓存可复用，若需重建也约 7.35 GB。缓存与 600 个累计训练轮次均为耗时任务，
+实际时长取决于服务器和数据 I/O，以进度日志为准。
+首次实验使用新的输出根目录，`mkdir` 拒绝覆盖已有同名实验；中断续训须复用完整原命令，
+对中断阶段加 `--resume auto`，不把新阶段初始化当作续训。
+
+```bash
+set -e
+cd ~/liuanda/lunar-radiomap-challenge
+data_root=~/liuanda/LunarRM
+los_cache=results/los_cache_v1
+diffuse_cache=results/diffuse_light_58_rx32_mu4_phi16
+out_root=runs/diffuse_light_rx32_v1
+
+for seed in 0 1; do
+  test -f "runs/los_both_v1/seed${seed}/firstU/radiownet_58_masked_firstU_los_both_best.pt"
+done
+
+python build_los_cache.py \
+  --data-root "$data_root" --cache-root "$los_cache" --device cuda
+python build_diffuse_cache.py \
+  --data-root "$data_root" --cache-root "$diffuse_cache" \
+  --method light --band 58 --rx-grid 32 --n-mu 4 --n-phi 16 \
+  --splits train val --device cuda --chunk 8192 --log-every 100
+
+mkdir "$out_root"
+for seed in 0 1; do
+  init="runs/los_both_v1/seed${seed}/firstU/radiownet_58_masked_firstU_los_both_best.pt"
+  for phase in firstU secondU; do
+    run_name="radiownet_58_masked_${phase}_los_distance_diffuse"
+    stage_out="$out_root/seed${seed}/$phase"
+    python train.py \
+      --data-root "$data_root" --band 58 --loss masked \
+      --first-features los_diffuse --second-features los_distance_diffuse \
+      --los-cache "$los_cache" --diffuse-cache "$diffuse_cache" --diffuse-rx-grid 32 \
+      --phase "$phase" --init-from "$init" \
+      --epochs 150 --batch-size 16 --lr 1e-4 \
+      --lr-sched cosine --lr-min 1e-6 --clip 0 \
+      --seed "$seed" --device cuda --amp --num-workers 8 --panels 0 \
+      --out "$stage_out" --run-name "$run_name"
+    init="$stage_out/${run_name}_best.pt"
+    python evaluate.py \
+      --data-root "$data_root" --ckpt "$init" --split val \
+      --los-cache "$los_cache" --diffuse-cache "$diffuse_cache" \
+      --batch-size 16 --device cuda --amp --num-workers 8 --panels 0 \
+      --out "$stage_out/val_full.json"
+  done
+done
+```
+
+训练后再用 `benchmark_physical_inputs.py` 对本轮 secondU best 计时，保留相同 rx32/mu4/phi16；
+去掉 `--initialize-diffuse`、换新报告文件名。此时 JSON 中
+`diffuse_consumed_by_checkpoint=true`，才是在测训练后实际消费 B 的模型。
 
 以下章节保留原参考实现的推导和验收记录。
 
@@ -183,7 +285,7 @@ G(p)=\left(\frac{\lambda}{4\pi}\right)^2
 ray chunk=262144、float64，`diffuse_gain` 计算耗时 **87.66 s**，未计输入读盘和缓存写盘；
 峰值 PyTorch CUDA 分配约 190 MB。
 该低方向数只用于计时与真实输入通路检查，没有通过角收敛验收。
-本实现尚不适合直接作为在线推理输入，也不推荐目前启动全量缓存或模型训练。
+该 reference 实现尚不适合直接作为在线推理输入，不推荐用它启动全量缓存或模型训练。
 提高速度和减少角求积误差仍是必须解决的数值问题，不能通过修改物理参数掩盖。
 
 项目内证据：现有 LOS/distance 未显式表达间接路径。本实现是否改善 RMSE，
@@ -215,7 +317,8 @@ python build_diffuse_cache.py \
 每 split 输出 `<split>.npy/.json`；JSON 保存频段、完整物理和数值配置、实际 loader、
 index 行、partial 范围、代码/环境版本、完成状态及逐图耗时。
 完整且相符的缓存只读复用，失败或不匹配缓存拒绝覆盖。
-此处尚未添加 Dataset/model 适配器；不能直接把缓存塞进现有 checkpoint 并声称兼容。
+上面的训练适配器只接受指定配置的 light 缓存；reference 缓存仅用于数值研究，
+不能直接塞进当前训练模式或旧 checkpoint 并声称兼容。
 
 ## 复杂度
 

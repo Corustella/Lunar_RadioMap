@@ -122,13 +122,14 @@ def read_cache(cache_root, dataset, config):
 
 
 class LOSDataset(Dataset):
-    """Append cached F, then apply the loader's original joint augmentation.
+    """Append cached F and optional B, then apply original joint augmentation.
 
     Cache indexing follows rows, so both bands can reuse a terrain+TX feature.
     Reads take O(HW) time/memory per sample; the whole cache stays memory-mapped.
     """
 
-    def __init__(self, base, cache_root, config, augment=False, augmentation=None):
+    def __init__(self, base, cache_root, config, augment=False, augmentation=None,
+                 diffuse_cache=None, diffuse_config=None):
         if base.augment or not base.normalize:
             raise ValueError("LOS adapter needs an unaugmented, normalized base dataset")
         if augment and augmentation is None:
@@ -138,10 +139,18 @@ class LOSDataset(Dataset):
         self.pl_min, self.pl_max, self.split = base.pl_min, base.pl_max, base.split
         self.path = read_cache(cache_root, base, config)
         self._features = None
+        if (diffuse_cache is None) != (diffuse_config is None):
+            raise ValueError("Diffuse inputs require both cache path and feature configuration")
+        self.diffuse_path, self._diffuse = None, None
+        if diffuse_cache is not None:
+            from diffuse_features import read_diffuse_cache
+
+            self.diffuse_path = read_diffuse_cache(diffuse_cache, base, diffuse_config)
 
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_features"] = None
+        state["_diffuse"] = None
         return state
 
     def __len__(self):
@@ -155,6 +164,11 @@ class LOSDataset(Dataset):
         row, _ = self.samples[index]
         feature = torch.from_numpy(np.array(self._features[row], copy=True)[None])
         x = torch.cat((items[0], feature), dim=0)
+        if self.diffuse_path is not None:
+            if self._diffuse is None:
+                self._diffuse = np.load(self.diffuse_path, mmap_mode="r")
+            diffuse = torch.from_numpy(np.array(self._diffuse[row], copy=True)[None])
+            x = torch.cat((x, diffuse), dim=0)
         if self.augment:
             positions = [i for i in range(1, len(items)) if isinstance(items[i], torch.Tensor)]
             channels, extra = self.augmentation(

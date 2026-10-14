@@ -21,6 +21,7 @@ and uses the PMNet adapter in ``pmnet.py`` for refinement.
 from __future__ import annotations
 
 import importlib.util
+import copy
 import math
 import os
 
@@ -35,8 +36,8 @@ clone or a stripped archive. Re-clone, or restore it from
 https://github.com/RonLevie/RadioUNet"""
 
 _cached = None
-FIRST_FEATURES = ("none", "los")
-SECOND_FEATURES = ("none", "los", "los_distance")
+FIRST_FEATURES = ("none", "los", "los_diffuse")
+SECOND_FEATURES = ("none", "los", "los_distance", "los_distance_diffuse")
 SECOND_ARCHITECTURES = ("radiounet", "pmnet")
 _FIRST_WEIGHTS = ("layer00.0.weight", "conv_up00.0.weight",
                   "conv_up000.0.weight")
@@ -62,19 +63,34 @@ def geometry_config(meta):
     return config
 
 
-def feature_config_for_mode(meta, mode):
+def feature_config_for_mode(meta, mode, diffuse_rx_grid=None):
     if mode == "none":
         return None
-    if mode not in ("los", "los_distance"):
+    if mode not in ("los", "los_distance", "los_distance_diffuse"):
         raise ValueError(f"Unsupported feature mode {mode!r}; supported modes are {SECOND_FEATURES}")
+    if mode == "los_distance_diffuse" and "diffuse_metadata" in meta:
+        meta = {**meta, **meta["diffuse_metadata"]}
+    if mode == "los_distance_diffuse" and diffuse_rx_grid is None:
+        diffuse_rx_grid = meta.get("diffuse", {}).get("receiver_sampling", {}).get("grid_size", 16)
     config = geometry_config(meta)
     from los_features import los_feature_config, log_distance_config
     config = los_feature_config(config)
-    if mode == "los_distance":
+    if mode in ("los_distance", "los_distance_diffuse"):
         config["distance"] = log_distance_config(config)
         # Keep the legacy LOS cache definition intact. This top-level layout
         # describes the refinement inputs when distance replaces a zero slot.
         config["second_channels"] = ["F", "rho", 0.0]
+    if mode == "los_distance_diffuse":
+        from diffuse_light import light_diffuse_config
+
+        # Preserve the source physics so a checkpoint can reconstruct and
+        # strictly validate the same fixed light-input configuration.
+        config["diffuse_metadata"] = copy.deepcopy({
+            key: meta[key] for key in ("bands_hz", "pathloss_range_db", "simulation")})
+        config["diffuse"] = light_diffuse_config(meta, band="58", n_mu=4, n_phi=16,
+                                                 rx_grid=diffuse_rx_grid)
+        config["first_channels"] = ["height", "TX", "F", "B"]
+        config["second_channels"] = ["F", "B", "rho"]
     return config
 
 
@@ -89,6 +105,8 @@ def checkpoint_first_features(checkpoint):
         raise ValueError(f"Unknown checkpoint second_features={second!r}; this experimental mode was archived")
     if first == "los" and second == "none":
         raise ValueError("first_features='los' requires LOS secondU features")
+    if (first == "los_diffuse") != (second == "los_distance_diffuse"):
+        raise ValueError("Use first_features='los_diffuse' with second_features='los_distance_diffuse'")
     return first
 
 
@@ -122,7 +140,8 @@ def _append_los(model, args):
     import torch
 
     (input,) = args
-    expected = model.base_inputs + 1
+    diffuse = model.second_features == "los_distance_diffuse"
+    expected = model.base_inputs + (2 if diffuse else 1)
     if input.ndim != 4:
         raise ValueError("LOS input must be BxCxHxW")
     if input.shape[1] != expected:
@@ -130,9 +149,13 @@ def _append_los(model, args):
     with torch.no_grad():
         feature = input[:, model.base_inputs:model.base_inputs + 1]
         distance = torch.zeros_like(feature)
-        if model.second_features == "los_distance":
+        if model.second_features in ("los_distance", "los_distance_diffuse"):
             from los_features import log_distance_feature
             distance = log_distance_feature(input, model.feature_config)
+        if diffuse:
+            # firstU slices [height,TX,F,B]. secondU receives
+            # [out1,height,TX,F,B,rho]; old rho weights migrate to the last slot.
+            return (torch.cat((input, distance), dim=1),)
         # firstU slices only base channels plus F when enabled; rho occupies
         # a previously zero secondU slot and is never supplied to firstU.
         return (torch.cat((input, distance,
@@ -153,6 +176,49 @@ def load_model_state(model, checkpoint, initialize=False):
     target_arch = model.second_architecture
     target_first = model.first_features
     target_mode = model.second_features
+    if source_mode == "los_distance_diffuse" or target_mode == "los_distance_diffuse":
+        same = (source_first == target_first and source_mode == target_mode and
+                source_config == model.feature_config and source_arch == target_arch)
+        if same:
+            model.load_state_dict(checkpoint["model"], strict=True)
+            return {"source_mode": source_mode, "target_mode": target_mode,
+                    "source_first_features": source_first, "target_first_features": target_first,
+                    "zero_padded_weights": [], "remapped_second_weights": []}
+        can_add = (initialize and target_mode == "los_distance_diffuse" and
+                   target_first == "los_diffuse" and source_first == "los" and
+                   source_mode in ("los", "los_distance") and
+                   source_arch == target_arch == "radiounet")
+        if not can_add:
+            raise ValueError("Diffuse resume/evaluation require identical inputs; use init-from a LOS model to add B")
+        expected_source = feature_config_for_mode(
+            {**model.feature_config, "simulation": model.feature_config}, source_mode)
+        if source_config != expected_source:
+            raise ValueError("Source LOS geometry/distance differs from diffuse target")
+        state = checkpoint["model"].copy()
+        expected = model.state_dict()
+        for name in _FIRST_WEIGHTS:
+            old, new = state[name], expected[name]
+            if old.shape != (new.shape[0], new.shape[1] - 1, *new.shape[2:]):
+                raise ValueError(f"Unexpected LOS input weight shape: {name}")
+            padded = old.new_zeros(new.shape)
+            padded[:, :old.shape[1]] = old
+            state[name] = padded
+        for name in _SECOND_WEIGHTS:
+            old = state[name]
+            if old.shape != expected[name].shape:
+                raise ValueError(f"Unexpected secondU input weight shape: {name}")
+            remapped = old.clone()
+            remapped[:, -2].zero_()  # B replaces the old rho position.
+            if source_mode == "los_distance":
+                remapped[:, -1] = old[:, -2]
+            else:
+                remapped[:, -1].zero_()  # Legacy LOS supplied no distance.
+            state[name] = remapped
+        model.load_state_dict(state, strict=True)
+        return {"source_mode": source_mode, "target_mode": target_mode,
+                "source_first_features": source_first, "target_first_features": target_first,
+                "zero_padded_weights": list(_FIRST_WEIGHTS),
+                "remapped_second_weights": list(_SECOND_WEIGHTS), "diffuse_added": True}
     if source_arch != target_arch:
         if not (initialize and source_arch == "radiounet" and target_arch == "pmnet"):
             raise ValueError("Checkpoint architecture differs; only init-from RadioUNet to PMNet is supported")
@@ -253,16 +319,19 @@ def _expand_inputs(model, names, added):
 
 def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=None,
               first_features="none", second_architecture="radiounet"):  # noqa: N802
-    """Build the upstream model with LOS and optional secondU log-distance.
+    """Build the upstream model with cached LOS/diffuse and secondU distance.
 
     By default state keys and the upstream forward remain unchanged. A both-stage model
     expands firstU's three input convolutions by one channel, preserving hidden
     widths even for band=both. Distance uses an existing zero secondU slot, so
     its parameter count matches LOS. Feature preparation takes O(BHW) time and
-    extra memory. At inputs=2, firstU adds only 579 parameters.
+    extra memory. At inputs=2, each added firstU channel adds 579 parameters.
+    Diffuse uses firstU [H,TX,F,B] and secondU [out1,H,TX,F,B,rho].
     """
     if second_architecture not in SECOND_ARCHITECTURES:
         raise ValueError(f"Unknown second_architecture={second_architecture!r}")
+    if second_features == "los_distance_diffuse" and (inputs != 2 or second_architecture != "radiounet"):
+        raise ValueError("Diffuse inputs currently support single-band RadioUNet only")
     checkpoint_first_features({"args": {"first_features": first_features,
                                         "second_features": second_features}})
     if second_features != "none" and inputs < 2:
@@ -274,9 +343,10 @@ def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=N
     elif feature_config is not None:
         raise ValueError("feature_config is only used by expanded models")
     model = load_module().RadioWNet(inputs=inputs, phase=phase)
-    if first_features == "los":
-        _expand_inputs(model, ("layer00", "conv_up00", "conv_up000"), 1)
-        model.inputs = inputs + 1
+    if first_features in ("los", "los_diffuse"):
+        added = 2 if first_features == "los_diffuse" else 1
+        _expand_inputs(model, ("layer00", "conv_up00", "conv_up000"), added)
+        model.inputs = inputs + added
     if second_architecture == "pmnet":
         from pmnet import RadioPMNet
         second_inputs = inputs + 1 + (3 if second_features != "none" else 0)

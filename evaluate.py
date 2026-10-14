@@ -138,7 +138,8 @@ def main(args):
               flush=True)
     base = ld.LunarRadioMapDataset(args.data_root, split=args.split, band=band,
                                    return_name=True, return_mask=need_mask)
-    if feature_config_for_mode(base.meta, second_features) != feature_config:
+    diffuse_grid = (feature_config or {}).get("diffuse", {}).get("receiver_sampling", {}).get("grid_size")
+    if feature_config_for_mode(base.meta, second_features, diffuse_rx_grid=diffuse_grid) != feature_config:
         raise ValueError("Evaluation metadata differs from checkpoint geometry scales")
     if second_features != "none":
         from los_features import LOSDataset
@@ -148,7 +149,13 @@ def main(args):
         # Distance is constructed from augmented inputs in the model. The
         # existing cache contains F only and keeps its original metadata.
         cache_config = feature_config_for_mode(base.meta, "los")
-        base = LOSDataset(base, cache_root, cache_config)
+        extra = {}
+        if second_features == "los_distance_diffuse":
+            diffuse_cache = args.diffuse_cache or saved.get("diffuse_cache")
+            if not diffuse_cache:
+                raise ValueError("Diffuse evaluation requires --diffuse-cache")
+            extra = {"diffuse_cache": diffuse_cache, "diffuse_config": feature_config["diffuse"]}
+        base = LOSDataset(base, cache_root, cache_config, **extra)
     lo, hi = base.pl_min, base.pl_max
     scale = float(hi - lo)
     ds = ScoredSet(base, lo, hi, need_mask)
@@ -274,6 +281,7 @@ def build_parser():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data-root", default="LunarRM")
     p.add_argument("--los-cache", default=None, help="LOS cache; defaults to the checkpoint's cache path")
+    p.add_argument("--diffuse-cache", default=None, help="light diffuse cache; defaults to checkpoint path")
     p.add_argument("--split", default="val", choices=["val", "test"])
     p.add_argument("--band", default=None, choices=["415", "58", "both"],
                    help="defaults to the band the checkpoint was trained on")

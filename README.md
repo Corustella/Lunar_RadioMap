@@ -65,6 +65,8 @@ python evaluate.py --ckpt runs/<run>_best.pt --data-root <data> --split val
 | `radiounet.py`                  | seam onto the vendored upstream model                                     |
 | `los_features.py`              | input-only terrain clearance, log-distance and cached features              |
 | `build_los_cache.py`           | builds or reuses train/val/test LOS caches                                  |
+| `build_diffuse_cache.py`       | input-only diffuse reference/light feature caches                          |
+| [DIFFUSE_FEATURES.md](DIFFUSE_FEATURES.md) | diffuse physics, runtime scope and two-stage rx32 training commands |
 | `run_los.py`                   | runs two seeds, each with firstU then secondU LOS training                   |
 | `experiment_provenance.py`     | code version, data/loader paths, settings and environment records            |
 | `RadioUNet/`                    | RadioUNet model code                                                      |

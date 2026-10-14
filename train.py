@@ -130,9 +130,16 @@ def make_loaders(ld, args):
         if not args.los_cache:
             raise ValueError("LOS inputs require --los-cache")
         config = feature_config_for_mode(train_ds.meta, "los")
+        extra = {}
+        if args.second_features == "los_distance_diffuse":
+            if not args.diffuse_cache:
+                raise ValueError("Diffuse training requires --diffuse-cache with complete train/val arrays")
+            full_config = feature_config_for_mode(train_ds.meta, args.second_features,
+                                                   diffuse_rx_grid=args.diffuse_rx_grid)
+            extra = {"diffuse_cache": args.diffuse_cache, "diffuse_config": full_config["diffuse"]}
         train_ds = LOSDataset(train_ds, args.los_cache, config,
-                              augment=not args.no_augment, augmentation=ld._augment)
-        val_ds = LOSDataset(val_ds, args.los_cache, config)
+                              augment=not args.no_augment, augmentation=ld._augment, **extra)
+        val_ds = LOSDataset(val_ds, args.los_cache, config, **extra)
     print(f"samples: {len(train_ds)} train / {len(val_ds)} val")
 
     dl = dict(batch_size=args.batch_size, num_workers=args.num_workers,
@@ -199,6 +206,8 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
 
 
 def main(args):
+    if args.second_features == "los_distance_diffuse" and args.band != "58":
+        raise ValueError("This diffuse training protocol is the 5.775 GHz single-band experiment")
     if args.second_architecture == "pmnet" and args.phase != "secondU":
         raise ValueError("--second-architecture pmnet trains only secondU with a frozen firstU")
     if args.second_architecture == "pmnet" and not (args.init_from or args.resume):
@@ -225,7 +234,8 @@ def main(args):
     in_ch = 3 if args.band == "both" else 2
 
     out_idx = 0 if args.phase == "firstU" else 1
-    feature_config = feature_config_for_mode(ds.meta, args.second_features)
+    feature_config = feature_config_for_mode(ds.meta, args.second_features,
+                                              diffuse_rx_grid=args.diffuse_rx_grid)
     model = RadioWNet(inputs=in_ch, phase=args.phase,
                      second_features=args.second_features, feature_config=feature_config,
                      first_features=args.first_features,
@@ -457,10 +467,13 @@ def build_parser():
     p.add_argument("--second-architecture", default="radiounet", choices=SECOND_ARCHITECTURES,
                    help="refinement backbone; pmnet trains only secondU and copies only firstU from RadioUNet")
     p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,
-                   help="append cached LOS clearance F to firstU; requires LOS secondU features")
+                   help="firstU inputs: none, los [F], los_diffuse [F,B]")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
-                   help="secondU inputs: none, los [F,0,0], or los_distance [F,rho,0]")
+                   help="secondU inputs: none, los [F,0,0], los_distance [F,rho,0], los_distance_diffuse [F,B,rho]")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
+    p.add_argument("--diffuse-cache", default=None, help="complete light mu4 phi16 input cache")
+    p.add_argument("--diffuse-rx-grid", type=int, choices=[16, 32], default=16,
+                   help="diffuse receiver grid; must match cache (approved server candidate: 32)")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -507,6 +520,8 @@ if __name__ == "__main__":
             a.run_name += "_los_both" if a.first_features == "los" else "_los"
         elif a.second_features == "los_distance":
             a.run_name += "_los_distance_both" if a.first_features == "los" else "_los_distance"
+        elif a.second_features == "los_distance_diffuse":
+            a.run_name += "_los_distance_diffuse"
         if a.second_architecture != "radiounet":
             a.run_name += "_" + a.second_architecture
     # The second stage is useless on top of a random first U-Net, so it seeds

@@ -1,7 +1,7 @@
 """Small local batch-one budget check; no feature cache and no training.
 
-The legacy checkpoint does not consume the computed diffuse feature. Its
-unchanged two-U forward is used only to estimate current network cost.
+Diffuse checkpoints consume B in both U-Nets. Legacy LOS-distance checkpoints
+remain supported as a network-cost estimate and are marked explicitly.
 """
 
 import argparse
@@ -53,19 +53,30 @@ def main(args):
     second_features, config = checkpoint_features(checkpoint)
     first_features = checkpoint_first_features(checkpoint)
     architecture = checkpoint_architecture(checkpoint)
-    if second_features != "los_distance" or first_features != "los":
-        raise ValueError("Expected both-stage LOS and second-stage distance")
-    if config != feature_config_for_mode(dataset.meta, second_features):
+    trained_diffuse = second_features == "los_distance_diffuse"
+    if args.initialize_diffuse:
+        if trained_diffuse or first_features != "los" or second_features != "los_distance":
+            raise ValueError("--initialize-diffuse requires a legacy LOS-distance checkpoint")
+        if config != feature_config_for_mode(dataset.meta, second_features):
+            raise ValueError("Source checkpoint metadata differs from actual input metadata")
+        first_features, second_features = "los_diffuse", "los_distance_diffuse"
+        config = feature_config_for_mode(dataset.meta, second_features, diffuse_rx_grid=args.rx_grid)
+    consume_diffuse = first_features == "los_diffuse" and second_features == "los_distance_diffuse"
+    if not consume_diffuse and (second_features != "los_distance" or first_features != "los"):
+        raise ValueError("Expected both-stage LOS/diffuse and second-stage distance")
+    if config != feature_config_for_mode(dataset.meta, second_features, diffuse_rx_grid=args.rx_grid):
         raise ValueError("Checkpoint metadata differs from actual input metadata")
     model = RadioWNet(inputs=2, phase="secondU", second_features=second_features,
                       feature_config=config, first_features=first_features,
                       second_architecture=architecture).to(device)
-    load_model_state(model, checkpoint)
+    load_model_state(model, checkpoint, initialize=args.initialize_diffuse)
     model.eval()
     amp = bool(saved.get("amp", False))
     los_config = feature_config_for_mode(dataset.meta, "los")
     light_config = light_diffuse_config(dataset.meta, band="58", n_mu=args.n_mu,
                                         n_phi=args.n_phi, rx_grid=args.rx_grid)
+    if consume_diffuse and light_config != config["diffuse"]:
+        raise ValueError("Timing configuration differs from the trained diffuse input")
     light = LightDiffuse(light_config, device="cuda", ray_chunk=args.ray_chunk)
     synchronize()
     static_init_ms = (time.perf_counter() - init_start) * 1000
@@ -96,11 +107,13 @@ def main(args):
         normalized_height = dataset._norm(height, dataset.hm_min, dataset.hm_max)
         model_input = torch.from_numpy(np.stack((normalized_height, tx_map, los)))
         model_input = model_input.unsqueeze(0).to(device)
+        if consume_diffuse:
+            model_input = torch.cat((model_input, diffuse), dim=1)
         synchronize()
         encoding_end = time.perf_counter()
 
-        # Do not inject B into a checkpoint never trained to consume it.
-        # The distance pre-hook and both U-Nets remain exactly as evaluate.py.
+        # The distance pre-hook and both U-Nets match evaluation. Legacy
+        # checkpoints never receive a channel they were not trained to consume.
         with torch.autocast("cuda", enabled=amp):
             prediction = model(model_input)[1]
         prediction_db = (prediction.float() * (dataset.pl_max - dataset.pl_min)
@@ -109,7 +122,7 @@ def main(args):
         end = time.perf_counter()
 
         if not np.isfinite(prediction_db).all():
-            raise FloatingPointError("Nonfinite legacy model output")
+            raise FloatingPointError("Nonfinite model output")
         if not torch.isfinite(diffuse).all().item():
             raise FloatingPointError("Nonfinite diffuse feature")
         result = {
@@ -125,7 +138,7 @@ def main(args):
             "peak_allocated_mb_including_static_model": torch.cuda.max_memory_allocated() / 1e6,
             "diffuse_shape": list(diffuse.shape),
             "diffuse_range": [diffuse.min().item(), diffuse.max().item()],
-            "legacy_prediction_db_range": [float(prediction_db.min()), float(prediction_db.max())],
+            "prediction_db_range": [float(prediction_db.min()), float(prediction_db.max())],
         }
         print(json.dumps(result), flush=True)
         return result
@@ -151,7 +164,9 @@ def main(args):
         "python": sys.executable, "loader": ld.__file__, "checkpoint": str(Path(args.ckpt).resolve()),
         "data_root": str(Path(args.data_root).resolve()), "batch_size": 1, "amp_from_checkpoint": amp,
         "split": args.split, "indices": args.indices, "repeats": args.repeats,
-        "light_feature_config": light.config, "diffuse_consumed_by_checkpoint": False,
+        "light_feature_config": light.config, "diffuse_consumed_by_checkpoint": trained_diffuse,
+        "diffuse_input_in_forward": consume_diffuse,
+        "diffuse_weights_zero_initialized_for_budget": args.initialize_diffuse,
         "static_init_ms": static_init_ms,
         "static_init_scope": "Actual loader/dataset setup, checkpoint load, model construction/upload, CUDA initialization and material LUT; Python/module import startup excluded.",
         "first_features": first_features, "second_features": second_features,
@@ -159,9 +174,13 @@ def main(args):
         "light_config": {"n_mu": args.n_mu, "n_phi": args.n_phi,
                          "receiver_size": args.rx_grid, "ray_chunk": args.ray_chunk,
                          "step_px": light.step_px, "refine_steps": light.refine_steps},
-        "scope": "Fresh actual-loader raw height/TX reads -> uncached LOS -> uncached light diffuse -> input normalization/H2D -> legacy checkpoint's distance hook and both U-Nets -> dB numpy D2H; per-stage CUDA synchronization included.",
+        "scope": "Fresh actual-loader raw height/TX reads -> uncached LOS -> uncached light diffuse -> input normalization/H2D -> checkpoint's distance hook and both U-Nets -> dB numpy D2H; per-stage CUDA synchronization included.",
         "limitations": [
-            "Legacy checkpoint does not consume B; this is a current-network computation budget only, not new-model quality or formal challenge compliance.",
+            ("New B input weights are zero for a pretraining architecture-cost check; no trained diffuse quality or formal challenge compliance is claimed."
+             if args.initialize_diffuse else
+             "Checkpoint consumes B in both U-Nets; this is a local runtime measurement, not formal challenge compliance."
+             if trained_diffuse else
+             "Legacy checkpoint does not consume B; this is a current-network computation budget only, not new-model quality or formal challenge compliance."),
             "Selected input rows and repeats only; P95 is a descriptive linear percentile, not a robust tail guarantee.",
             "Rows may share terrain; no feature results are reused, but OS file cache and CUDA allocator are warm.",
             "Stage synchronization can change overlap and timings; total includes synchronization overhead.",
@@ -183,7 +202,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--ckpt", required=True,
-                        help="existing band58 LOS-distance secondU checkpoint; measures network budget only")
+                        help="band58 secondU checkpoint: trained diffuse model or legacy LOS-distance cost surrogate")
+    parser.add_argument("--initialize-diffuse", action="store_true",
+                        help="expand legacy LOS-distance inputs with zero B weights for pretraining timing only; no checkpoint written")
     parser.add_argument("--out", required=True, help="new JSON path; existing files are never overwritten")
     parser.add_argument("--split", choices=["train", "val", "test"], default="val")
     parser.add_argument("--indices", nargs="+", type=int, default=[0, 1, 2])
