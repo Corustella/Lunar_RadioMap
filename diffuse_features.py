@@ -190,6 +190,10 @@ def diffuse_gain(height_m, tx, config, device="cpu", chunk=65536):
     N=HW, K=n_mu*n_phi, L<=H+W cells per segment: time O(NKL), working memory
     O(max(chunk,K)+N). Complete receiver direction groups avoid atomic sums.
     """
+    if config.get("method", "reference") != "reference":
+        raise ValueError("diffuse_gain requires the reference configuration; use LightDiffuse for light inputs")
+    if config.get("quantity") != "single_bounce_lambertian_gain_proxy":
+        raise ValueError("Unsupported reference diffuse quantity")
     if not isinstance(chunk, int) or chunk <= 0:
         raise ValueError("chunk must be a positive ray-batch size")
     height_m = np.asarray(height_m)

@@ -25,6 +25,19 @@ def positive_int(value):
     return value
 
 
+def feature_config(meta, args):
+    if args.method == "light":
+        from diffuse_light import light_diffuse_config
+
+        return light_diffuse_config(meta, band=args.band, n_mu=args.n_mu,
+                                    n_phi=args.n_phi, rx_grid=args.rx_grid)
+    if args.method != "reference":
+        raise ValueError(f"Unsupported diffuse method: {args.method!r}")
+    from diffuse_features import diffuse_feature_config
+
+    return diffuse_feature_config(meta, args.band, n_mu=args.n_mu, n_phi=args.n_phi)
+
+
 def selected_dataset(dataset, limit_rows):
     """Select an index prefix without fetching a sample, label or mask."""
     source_rows = len(dataset.rows)
@@ -73,6 +86,7 @@ def build_split(dataset, cache_root, config, device, loader_path, provenance,
         "chunk": chunk, "chunk_unit": "rays", "completed_rows": 0,
         "input_height": "raw_metres_without_normalization_or_clipping",
         "row_seconds": [],
+        "method": config.get("method", "reference"),
     }
 
     def save():
@@ -82,6 +96,14 @@ def build_split(dataset, cache_root, config, device, loader_path, provenance,
     start = time.monotonic()
     array = None
     try:
+        light = None
+        method = config.get("method", "reference")
+        if method not in ("reference", "dual_center_light_v1"):
+            raise ValueError(f"Unsupported diffuse construction method: {method!r}")
+        if method == "dual_center_light_v1":
+            from diffuse_light import LightDiffuse
+
+            light = LightDiffuse(config, device=device, ray_chunk=chunk)
         array = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32,
                                           shape=tuple(manifest["shape"]))
         for i in range(len(dataset.rows)):
@@ -94,7 +116,10 @@ def build_split(dataset, cache_root, config, device, loader_path, provenance,
             if locations.shape != (1, 2) or np.count_nonzero(tx_map) != 1:
                 raise ValueError(f"Expected one-hot TX at {dataset.split} row {i}")
             tx = tuple(map(int, locations[0]))
-            feature = np.asarray(diffuse_feature(height_m, tx, config, device, chunk=chunk))
+            if light is None:
+                feature = np.asarray(diffuse_feature(height_m, tx, config, device, chunk=chunk))
+            else:
+                feature = light.feature_numpy(height_m, tx)
             if feature.shape != tuple(config["grid"]) or feature.dtype != np.float32:
                 raise ValueError(f"Diffuse feature must be float32 {tuple(config['grid'])}; "
                                  f"got {feature.dtype} {feature.shape}")
@@ -120,8 +145,6 @@ def build_split(dataset, cache_root, config, device, loader_path, provenance,
 
 
 def main(args):
-    from diffuse_features import diffuse_feature_config
-
     if args.n_phi % 4:
         raise ValueError("--n-phi must be a multiple of 4")
     if len(set(args.splits)) != len(args.splits):
@@ -130,19 +153,19 @@ def main(args):
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable for diffuse cache construction")
     args.device = str(device)
+    if args.chunk is None:
+        args.chunk = 8192 if args.method == "light" else 65536
     ld = load_dataset_module(args.data_root)
     datasets = [ld.LunarRadioMapDataset(args.data_root, split=split, band=args.band,
                                        normalize=False, augment=False, return_mask=False)
                 for split in args.splits]
-    config = diffuse_feature_config(datasets[0].meta, args.band,
-                                    n_mu=args.n_mu, n_phi=args.n_phi)
+    config = feature_config(datasets[0].meta, args)
     selections = [selected_dataset(dataset, args.limit_rows) for dataset in datasets]
     root = Path(args.cache_root).resolve()
     needed = 0
     plans = []
     for dataset, source_rows, row_indices in selections:
-        if diffuse_feature_config(dataset.meta, args.band, n_mu=args.n_mu,
-                                  n_phi=args.n_phi) != config:
+        if feature_config(dataset.meta, args) != config:
             raise ValueError("Diffuse configuration differs between selected splits")
         reuse = existing_cache(root, dataset, config)
         if not reuse:
@@ -177,6 +200,10 @@ def build_parser():
     parser.add_argument("--cache-root", required=True,
                         help="new directory, or a complete cache matching all selected rows and parameters")
     parser.add_argument("--band", choices=["58", "415"], default="58")
+    parser.add_argument("--method", choices=["reference", "light"], default="reference",
+                        help="exact bilinear-DDA reference or coarse dual-center input proxy")
+    parser.add_argument("--rx-grid", type=positive_int, default=16,
+                        help="light method's receiver grid side; ignored by reference")
     parser.add_argument("--n-mu", type=positive_int, required=True,
                         help="explicit full-sphere cos(theta) quadrature order >= 2; no validated default is assumed")
     parser.add_argument("--n-phi", type=positive_int, required=True,
@@ -185,8 +212,8 @@ def build_parser():
     parser.add_argument("--limit-rows", type=positive_int, default=None,
                         help="build only the first N index rows per split; use a separate partial-cache directory")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--chunk", type=positive_int, default=65536,
-                        help="ray batch size, not RX pixel count")
+    parser.add_argument("--chunk", type=positive_int, default=None,
+                        help="ray batch size: default 65536 for reference, 8192 for light")
     parser.add_argument("--log-every", type=positive_int, default=1,
                         help="print progress every N completed maps")
     parser.add_argument("--dry-run", action="store_true",
