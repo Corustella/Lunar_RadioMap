@@ -4,6 +4,10 @@ Baseline training for the First Lunar Pathloss Radio Map Prediction Challenge.
 Trains RadioWNet to predict a 256x256 pathloss map in dB from a lunar heightmap
 and a one-hot transmitter position.
 
+``--arch lunar_maxvit`` instead trains an independent encoder/decoder jointly,
+with phase ``single`` and input-only LOS/distance features. It reuses the LOS
+cache, masked loss and evaluation path. See LUNAR_MAXVIT.md for server commands.
+
 Two-stage training
 ------------------
 RadioWNet is two U-Nets in series and they are trained one at a time, because
@@ -76,8 +80,10 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels 
-from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES, SECOND_ARCHITECTURES,
-                       feature_config_for_mode, load_model_state)
+from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
+                       feature_config_for_mode)
+from model_factory import (ARCHITECTURES, build_model, load_checkpoint,
+                           model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
 
 
@@ -121,7 +127,7 @@ def resolve_init_from(args):
 
 def make_loaders(ld, args):
     common = dict(root=args.data_root, band=args.band, return_mask=True)
-    use_los = args.second_features != "none"
+    use_los = uses_los(args.arch, args.second_features)
     train_ds = ld.LunarRadioMapDataset(split="train", augment=not args.no_augment and not use_los,
                                        **common)
     val_ds = ld.LunarRadioMapDataset(split="val", augment=False, **common)
@@ -130,16 +136,9 @@ def make_loaders(ld, args):
         if not args.los_cache:
             raise ValueError("LOS inputs require --los-cache")
         config = feature_config_for_mode(train_ds.meta, "los")
-        extra = {}
-        if args.second_features == "los_distance_diffuse":
-            if not args.diffuse_cache:
-                raise ValueError("Diffuse training requires --diffuse-cache with complete train/val arrays")
-            full_config = feature_config_for_mode(train_ds.meta, args.second_features,
-                                                   diffuse_rx_grid=args.diffuse_rx_grid)
-            extra = {"diffuse_cache": args.diffuse_cache, "diffuse_config": full_config["diffuse"]}
         train_ds = LOSDataset(train_ds, args.los_cache, config,
-                              augment=not args.no_augment, augmentation=ld._augment, **extra)
-        val_ds = LOSDataset(val_ds, args.los_cache, config, **extra)
+                              augment=not args.no_augment, augmentation=ld._augment)
+        val_ds = LOSDataset(val_ds, args.los_cache, config)
     print(f"samples: {len(train_ds)} train / {len(val_ds)} val")
 
     dl = dict(batch_size=args.batch_size, num_workers=args.num_workers,
@@ -205,47 +204,62 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
                                err_lim=err_lim)
 
 
+def prepare_args(args):
+    if args.phase is None:
+        args.phase = "single" if args.arch == "lunar_maxvit" else "firstU"
+    output_index(args.arch, args.phase)
+    if args.arch == "lunar_maxvit":
+        if args.band == "both":
+            raise ValueError("lunar_maxvit uses one band per model; use --band 58 or 415")
+        if args.first_features != "none" or args.second_features != "none":
+            raise ValueError("lunar_maxvit uses F and rho automatically; omit RadioWNet stage feature flags")
+        if args.init_from == "auto":
+            raise ValueError("lunar_maxvit has no firstU checkpoint; use scratch or an explicit matching checkpoint")
+    if args.run_name is None:
+        args.run_name = f"{args.arch}_{args.band}_{args.loss}_{args.phase}"
+        if args.arch == "lunar_maxvit":
+            args.run_name += "_los_distance"
+        elif args.second_features == "los":
+            args.run_name += "_los_both" if args.first_features == "los" else "_los"
+        elif args.second_features == "los_distance":
+            args.run_name += "_los_distance_both" if args.first_features == "los" else "_los_distance"
+    if args.init_from is None and args.phase == "secondU":
+        args.init_from = "auto"
+    if args.init_from in ("none", "scratch", ""):
+        args.init_from = None
+
+
 def main(args):
-    if args.second_features == "los_distance_diffuse" and args.band != "58":
-        raise ValueError("This diffuse training protocol is the 5.775 GHz single-band experiment")
-    if args.second_architecture == "pmnet" and args.phase != "secondU":
-        raise ValueError("--second-architecture pmnet trains only secondU with a frozen firstU")
-    if args.second_architecture == "pmnet" and not (args.init_from or args.resume):
-        raise ValueError("PMNet requires --init-from <trained-firstU.pt> or --resume")
-    if args.first_features == "los" and args.second_features == "none":
+    prepare_args(args)
+    if args.arch == "radiownet" and args.first_features == "los" and args.second_features == "none":
         raise ValueError("--first-features los requires LOS secondU features")
-    if args.second_features != "none" and args.first_features == "none" and args.phase == "firstU":
+    if (args.arch == "radiownet" and args.second_features != "none" and
+            args.first_features == "none" and args.phase == "firstU"):
         raise ValueError("LOS firstU training requires --first-features los")
-    if args.second_features == "los_distance" and args.phase != "secondU":
+    if args.arch == "radiownet" and args.second_features == "los_distance" and args.phase != "secondU":
         raise ValueError("--second-features los_distance trains only secondU; initialize from a LOS firstU checkpoint")
     ld = load_dataset_module(args.data_root)
     set_seed(args.seed)
     device = torch.device(args.device)
 
     train_loader, val_loader, ds = make_loaders(ld, args)
-    if args.second_architecture == "pmnet":
-        if args.batch_size < 2 or len(ds) < 2 or len(ds) % args.batch_size == 1:
-            raise ValueError("PMNet image-pooling BatchNorm requires at least two samples in every training batch; "
-                             "the loader retains the final batch")
 
     # dB per unit of normalized target so RMSE is reported in real units
     lo, hi = ds.pl_min, ds.pl_max
     scale = float(hi - lo)
     in_ch = 3 if args.band == "both" else 2
 
-    out_idx = 0 if args.phase == "firstU" else 1
-    feature_config = feature_config_for_mode(ds.meta, args.second_features,
-                                              diffuse_rx_grid=args.diffuse_rx_grid)
-    model = RadioWNet(inputs=in_ch, phase=args.phase,
-                     second_features=args.second_features, feature_config=feature_config,
-                     first_features=args.first_features,
-                     second_architecture=args.second_architecture).to(device)
+    out_idx = output_index(args.arch, args.phase)
+    feature_config = model_feature_config(ds.meta, args.arch, args.second_features)
+    model = build_model(args.arch, inputs=in_ch, phase=args.phase,
+                        second_features=args.second_features, feature_config=feature_config,
+                        first_features=args.first_features).to(device)
     
     for pname, prm in model.named_parameters():
-        prm.requires_grad_(trains_in_phase(pname, args.phase, args.second_architecture))
+        prm.requires_grad_(args.arch == "lunar_maxvit" or trains_in_phase(pname, args.phase))
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in model.parameters())
-    print(f"trainable params {n_train:,} / {n_total:,} ({args.phase} half)")
+    print(f"trainable params {n_train:,} / {n_total:,} ({args.arch}, {args.phase})")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -278,9 +292,9 @@ def main(args):
                     previous.get("band", args.band) != args.band):
                 raise ValueError("Resume requires the same loss, phase and band; use --init-from for a new stage")
             checkpoint_sources["resume"] = path
-            weight_loading = load_model_state(model, ck)
+            weight_loading = load_checkpoint(model, ck)
             opt.load_state_dict(ck["opt"])
-            if "scaler" in ck:
+            if ck.get("scaler"):
                 scaler.load_state_dict(ck["scaler"])
 
             prev_sched = ck.get("lr_sched", "step")
@@ -320,13 +334,11 @@ def main(args):
         if prev.get("band", args.band) != args.band:
             raise SystemExit(f"--init-from {path} was trained on band "
                              f"{prev.get('band')}, this run is band {args.band}")
-        weight_loading = load_model_state(model, ck, initialize=True)
+        weight_loading = load_checkpoint(model, ck, initialize=True)
         print(f"initialized weights from {path} (phase {prev.get('phase', '?')}, "
               f"epoch {ck.get('epoch')}, best {ck.get('best', float('nan')):.4f} dB); "
               f"optimizer and LR schedule start fresh")
     elif args.phase == "secondU" and not resumed:
-        if args.second_architecture == "pmnet":
-            raise ValueError("PMNet requires a trained firstU checkpoint; no initialization or resume was loaded")
         print("warning: training secondU from random init -- the frozen first "
               "U-Net is untrained, so its output is noise. Pass --init-from "
               "<firstU checkpoint>.")
@@ -335,10 +347,11 @@ def main(args):
     provenance["first_features"] = args.first_features
     provenance["second_features"] = args.second_features
     provenance["feature_config"] = feature_config
+    provenance["model_config"] = model.model_config
+    if args.arch == "lunar_maxvit":
+        from importlib.metadata import version
+        provenance["environment"]["torchvision"] = version("torchvision")
     provenance["weight_loading"] = weight_loading
-    provenance["second_architecture"] = args.second_architecture
-    provenance["model_config"] = getattr(model, "model_config", None)
-    provenance["parameters"] = {"trainable": n_train, "total": n_total}
     # On resume retain the original initialization record as well.
     prov_path = os.path.join(args.out, f"{args.run_name}_provenance.json")
     if resumed and os.path.exists(prov_path):
@@ -354,9 +367,8 @@ def main(args):
                  if k > 0 else [])
 
     print(f"training {args.run_name}: band={args.band} loss={args.loss} "
-          f"phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
-          f"first_features={args.first_features} second_features={args.second_features} "
-          f"second_architecture={args.second_architecture}")
+          f"arch={args.arch} phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
+          f"first_features={args.first_features} second_features={args.second_features}")
 
     hist_cols = None
     for epoch in range(start_epoch, args.epochs):
@@ -425,26 +437,25 @@ def main(args):
         # Selecting a plain run on all-pixel RMSE would pick the checkpoint that
         # best reproduces the 5.8 GHz fill, which is not what it is scored on.
         sel = metrics["val/rmse_db_masked"]
-        state = {"model": model.state_dict(), "opt": opt.state_dict(),
-                 "sched": sched.state_dict(), "lr_sched": args.lr_sched,
-                 "scaler": scaler.state_dict(),
-                 "epoch": epoch, "best": min(best, sel), "args": vars(args),
-                 "metrics": metrics, "feature_config": feature_config,
-                 "model_config": getattr(model, "model_config", None)}
-        torch.save(state, ckpt_last)
-        if sel < best:
+        improved = sel < best
+        if improved:
             best = sel
-            state["best"] = best
+        state = {"model": model.state_dict(), "opt": opt.state_dict(),
+                 "scaler": scaler.state_dict(),
+                 "sched": sched.state_dict(), "lr_sched": args.lr_sched,
+                 "epoch": epoch, "best": best, "args": vars(args),
+                 "metrics": metrics, "feature_config": feature_config,
+                 "model_config": model.model_config}
+        torch.save(state, ckpt_last)
+        if improved:
             torch.save(state, ckpt_best)
             print(f"  new best {best:.4f} dB -> {ckpt_best}")
 
     with open(os.path.join(args.out, f"{args.run_name}_summary.json"), "w") as f:
         json.dump({"run": args.run_name, "band": args.band, "loss": args.loss,
-                   "phase": args.phase, "init_from": args.init_from,
+                   "phase": args.phase, "arch": args.arch, "init_from": args.init_from,
+                   "model_config": model.model_config,
                    "first_features": args.first_features,
-                   "second_architecture": args.second_architecture,
-                   "model_config": getattr(model, "model_config", None),
-                   "parameters": {"trainable": n_train, "total": n_total},
                    "second_features": args.second_features, "feature_config": feature_config,
                    "selection_metric": "val/rmse_db_masked",
                    "best": best, "epochs": args.epochs}, f, indent=2)
@@ -453,8 +464,10 @@ def main(args):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        description="Train the RadioWNet baseline on the lunar pathloss dataset.")
+        description="Train RadioWNet or the single-stage lunar MaxViT model.")
     p.add_argument("--data-root", default="LunarRM")
+    p.add_argument("--arch", default="radiownet", choices=ARCHITECTURES,
+                   help="lunar_maxvit trains the whole encoder/decoder using H, TX, F and rho")
     p.add_argument("--band", default="58", choices=["415", "58", "both"],
                    help="'both' trains one conditional model over both "
                         "frequencies and adds a band-flag input channel")
@@ -463,17 +476,13 @@ def build_parser():
                         "is the challenge objective. plain counts the 5.8 GHz "
                         "fill too and is kept only as an ablation; either way the "
                         "run is selected and ranked on valid pixels.")
-    p.add_argument("--phase", default="firstU", choices=["firstU", "secondU"])
-    p.add_argument("--second-architecture", default="radiounet", choices=SECOND_ARCHITECTURES,
-                   help="refinement backbone; pmnet trains only secondU and copies only firstU from RadioUNet")
+    p.add_argument("--phase", default=None, choices=["firstU", "secondU", "single"],
+                   help="default: firstU for RadioWNet, single for lunar_maxvit")
     p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,
-                   help="firstU inputs: none, los [F], los_diffuse [F,B]")
+                   help="append cached LOS clearance F to firstU; requires LOS secondU features")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
-                   help="secondU inputs: none, los [F,0,0], los_distance [F,rho,0], los_distance_diffuse [F,B,rho]")
+                   help="secondU inputs: none, los [F,0,0], or los_distance [F,rho,0]")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
-    p.add_argument("--diffuse-cache", default=None, help="complete light mu4 phi16 input cache")
-    p.add_argument("--diffuse-rx-grid", type=int, choices=[16, 32], default=16,
-                   help="diffuse receiver grid; must match cache (approved server candidate: 32)")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -514,20 +523,4 @@ def build_parser():
 
 if __name__ == "__main__":
     a = build_parser().parse_args()
-    if a.run_name is None:
-        a.run_name = f"radiownet_{a.band}_{a.loss}_{a.phase}"
-        if a.second_features == "los":
-            a.run_name += "_los_both" if a.first_features == "los" else "_los"
-        elif a.second_features == "los_distance":
-            a.run_name += "_los_distance_both" if a.first_features == "los" else "_los_distance"
-        elif a.second_features == "los_distance_diffuse":
-            a.run_name += "_los_distance_diffuse"
-        if a.second_architecture != "radiounet":
-            a.run_name += "_" + a.second_architecture
-    # The second stage is useless on top of a random first U-Net, so it seeds
-    # itself from the firstU run by default; "none" is the explicit opt-out.
-    if a.init_from is None and a.phase == "secondU":
-        a.init_from = "auto"
-    if a.init_from in ("none", "scratch", ""):
-        a.init_from = None
     main(a)

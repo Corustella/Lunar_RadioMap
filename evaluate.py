@@ -49,8 +49,9 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels, ssim  
-from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features, feature_config_for_mode,
-                       checkpoint_architecture, load_model_state)  # noqa: E402
+from radiounet import feature_config_for_mode  # noqa: E402
+from model_factory import (build_model, checkpoint_architecture, checkpoint_input_config,
+                           load_checkpoint, model_feature_config, output_index, uses_los)
 
 BANDS = ("415", "58")
 
@@ -106,22 +107,20 @@ def main(args):
 
     ck = torch.load(args.ckpt, map_location=device, weights_only=False)
     saved = ck.get("args", {})
+    arch = checkpoint_architecture(ck)
     band = args.band or saved.get("band", "58")
     phase = args.phase or saved.get("phase", "firstU")
     # match the output that was actually trained for this phase; a secondU
     # checkpoint holds both halves, so --phase firstU scores its coarse output
-    out_idx = 0 if phase == "firstU" else 1
+    out_idx = output_index(arch, phase)
 
     in_ch = 3 if band == "both" else 2
-    second_features, feature_config = checkpoint_features(ck)
-    first_features = checkpoint_first_features(ck)
-    second_architecture = checkpoint_architecture(ck)
-    model = RadioWNet(inputs=in_ch, phase=phase, second_features=second_features,
-                     feature_config=feature_config, first_features=first_features,
-                     second_architecture=second_architecture).to(device)
-    load_model_state(model, ck)
+    first_features, second_features, feature_config = checkpoint_input_config(ck)
+    model = build_model(arch, inputs=in_ch, phase=phase, second_features=second_features,
+                        feature_config=feature_config, first_features=first_features).to(device)
+    load_checkpoint(model, ck)
     model.eval()
-    print(f"loaded {args.ckpt} (epoch {ck.get('epoch')}, band {band}, phase {phase}, "
+    print(f"loaded {args.ckpt} (epoch {ck.get('epoch')}, arch {arch}, band {band}, phase {phase}, "
           f"val best {ck.get('best', float('nan')):.4f} dB)")
 
     if args.split == "test":
@@ -138,10 +137,9 @@ def main(args):
               flush=True)
     base = ld.LunarRadioMapDataset(args.data_root, split=args.split, band=band,
                                    return_name=True, return_mask=need_mask)
-    diffuse_grid = (feature_config or {}).get("diffuse", {}).get("receiver_sampling", {}).get("grid_size")
-    if feature_config_for_mode(base.meta, second_features, diffuse_rx_grid=diffuse_grid) != feature_config:
+    if model_feature_config(base.meta, arch, second_features) != feature_config:
         raise ValueError("Evaluation metadata differs from checkpoint geometry scales")
-    if second_features != "none":
+    if uses_los(arch, second_features):
         from los_features import LOSDataset
         cache_root = args.los_cache or saved.get("los_cache")
         if not cache_root:
@@ -149,13 +147,7 @@ def main(args):
         # Distance is constructed from augmented inputs in the model. The
         # existing cache contains F only and keeps its original metadata.
         cache_config = feature_config_for_mode(base.meta, "los")
-        extra = {}
-        if second_features == "los_distance_diffuse":
-            diffuse_cache = args.diffuse_cache or saved.get("diffuse_cache")
-            if not diffuse_cache:
-                raise ValueError("Diffuse evaluation requires --diffuse-cache")
-            extra = {"diffuse_cache": diffuse_cache, "diffuse_config": feature_config["diffuse"]}
-        base = LOSDataset(base, cache_root, cache_config, **extra)
+        base = LOSDataset(base, cache_root, cache_config)
     lo, hi = base.pl_min, base.pl_max
     scale = float(hi - lo)
     ds = ScoredSet(base, lo, hi, need_mask)
@@ -227,12 +219,11 @@ def main(args):
             if bi % args.log_every == 0:
                 print(f"  {len(per_sample)}/{len(ds)}", flush=True)
 
-    summary = {"checkpoint": args.ckpt, "split": args.split, "band": band,
+    summary = {"checkpoint": args.ckpt, "split": args.split, "band": band, "arch": arch,
                "phase": phase, "epoch": ck.get("epoch"), "samples": len(per_sample),
                "first_features": first_features, "second_features": second_features,
-               "second_architecture": second_architecture,
-               "model_config": getattr(model, "model_config", None),
                "feature_config": feature_config,
+               "model_config": model.model_config,
                "official_metric": "rmse_db_masked" if need_mask else None}
     summary.update(accs["all"].compute())
     # a band with no items (only reachable under --limit, which walks 415 first)
@@ -277,15 +268,14 @@ def main(args):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        description="Score a RadioWNet checkpoint on the val or test split.")
+        description="Score a RadioWNet or lunar MaxViT checkpoint on the validation split.")
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data-root", default="LunarRM")
     p.add_argument("--los-cache", default=None, help="LOS cache; defaults to the checkpoint's cache path")
-    p.add_argument("--diffuse-cache", default=None, help="light diffuse cache; defaults to checkpoint path")
     p.add_argument("--split", default="val", choices=["val", "test"])
     p.add_argument("--band", default=None, choices=["415", "58", "both"],
                    help="defaults to the band the checkpoint was trained on")
-    p.add_argument("--phase", default=None, choices=["firstU", "secondU"],
+    p.add_argument("--phase", default=None, choices=["firstU", "secondU", "single"],
                    help="which output to score; defaults to the phase the "
                         "checkpoint was trained with. A secondU checkpoint can "
                         "be scored either way.")
