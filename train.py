@@ -4,7 +4,7 @@ Baseline training for the First Lunar Pathloss Radio Map Prediction Challenge.
 Trains RadioWNet to predict a 256x256 pathloss map in dB from a lunar heightmap
 and a one-hot transmitter position.
 
-``--arch lunar_maxvit`` instead trains an independent encoder/decoder jointly,
+``--arch lunar_maxvit`` or ``lunar_maxvit_fade`` trains an encoder/decoder jointly,
 with phase ``single`` and input-only LOS/distance features. It reuses the LOS
 cache, masked loss and evaluation path. See LUNAR_MAXVIT.md for server commands.
 
@@ -84,7 +84,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from metrics import MetricAccumulator, save_example_panels 
 from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
                        feature_config_for_mode)
-from model_factory import (ARCHITECTURES, build_model, load_checkpoint,
+from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, build_model,
+                           checkpoint_architecture, load_checkpoint,
                            model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
 from analysis_plots import save_training_curves
@@ -297,18 +298,18 @@ def prepare_args(args):
     if args.optimizer == "adam" and args.weight_decay != 0:
         raise ValueError("Nonzero --weight-decay requires --optimizer adamw")
     if args.phase is None:
-        args.phase = "single" if args.arch == "lunar_maxvit" else "firstU"
+        args.phase = "single" if args.arch in LUNAR_ARCHITECTURES else "firstU"
     output_index(args.arch, args.phase)
-    if args.arch == "lunar_maxvit":
+    if args.arch in LUNAR_ARCHITECTURES:
         if args.band == "both":
-            raise ValueError("lunar_maxvit uses one band per model; use --band 58 or 415")
+            raise ValueError(f"{args.arch} uses one band per model; use --band 58 or 415")
         if args.first_features != "none" or args.second_features != "none":
-            raise ValueError("lunar_maxvit uses F and rho automatically; omit RadioWNet stage feature flags")
+            raise ValueError(f"{args.arch} uses F and rho automatically; omit RadioWNet stage feature flags")
         if args.init_from == "auto":
-            raise ValueError("lunar_maxvit has no firstU checkpoint; use scratch or an explicit matching checkpoint")
+            raise ValueError(f"{args.arch} has no firstU checkpoint; use scratch or an explicit matching checkpoint")
     if args.run_name is None:
         args.run_name = f"{args.arch}_{args.band}_{args.loss}_{args.phase}"
-        if args.arch == "lunar_maxvit":
+        if args.arch in LUNAR_ARCHITECTURES:
             args.run_name += "_los_distance"
         elif args.second_features == "los":
             args.run_name += "_los_both" if args.first_features == "los" else "_los"
@@ -347,7 +348,7 @@ def main(args):
                         first_features=args.first_features).to(device)
     
     for pname, prm in model.named_parameters():
-        prm.requires_grad_(args.arch == "lunar_maxvit" or trains_in_phase(pname, args.phase))
+        prm.requires_grad_(args.arch in LUNAR_ARCHITECTURES or trains_in_phase(pname, args.phase))
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in model.parameters())
     print(f"trainable params {n_train:,} / {n_total:,} ({args.arch}, {args.phase})")
@@ -380,6 +381,8 @@ def main(args):
         path = ckpt_last if args.resume == "auto" else args.resume
         if os.path.exists(path):
             ck = torch.load(path, map_location=device, weights_only=False)
+            if checkpoint_architecture(ck) != args.arch:
+                raise ValueError("Resume requires the same architecture; train the new architecture from scratch")
             previous = ck.get("args", {})
             if (float(previous.get("grad_weight", 0.0)) != 0.0 or
                     previous.get("loss", args.loss) != args.loss or
@@ -447,7 +450,7 @@ def main(args):
     provenance["feature_config"] = feature_config
     provenance["model_config"] = model.model_config
     provenance["optimizer_config"] = optimizer_config
-    if args.arch == "lunar_maxvit":
+    if args.arch in LUNAR_ARCHITECTURES:
         from importlib.metadata import version
         provenance["environment"]["torchvision"] = version("torchvision")
     provenance["weight_loading"] = weight_loading
@@ -581,7 +584,7 @@ def build_parser():
         description="Train RadioWNet or the single-stage lunar MaxViT model.")
     p.add_argument("--data-root", default="LunarRM")
     p.add_argument("--arch", default="radiownet", choices=ARCHITECTURES,
-                   help="lunar_maxvit trains the whole encoder/decoder using H, TX, F and rho")
+                   help="lunar_maxvit variants train the whole encoder/decoder using H, TX, F and rho")
     p.add_argument("--band", default="58", choices=["415", "58", "both"],
                    help="'both' trains one conditional model over both "
                         "frequencies and adds a band-flag input channel")
@@ -591,7 +594,7 @@ def build_parser():
                         "fill too and is kept only as an ablation; either way the "
                         "run is selected and ranked on valid pixels.")
     p.add_argument("--phase", default=None, choices=["firstU", "secondU", "single"],
-                   help="default: firstU for RadioWNet, single for lunar_maxvit")
+                   help="default: firstU for RadioWNet, single for lunar_maxvit variants")
     p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,
                    help="append cached LOS clearance F to firstU; requires LOS secondU features")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,

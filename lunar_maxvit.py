@@ -14,10 +14,12 @@ from torchvision.models.maxvit import MaxVit
 from los_features import log_distance_feature
 
 
-def lunar_model_config():
+def lunar_model_config(arch="lunar_maxvit"):
     """Complete fixed architecture description, also saved in checkpoints."""
-    return {
-        "arch": "lunar_maxvit", "version": 1,
+    if arch not in ("lunar_maxvit", "lunar_maxvit_fade"):
+        raise ValueError(f"Unsupported lunar architecture {arch!r}")
+    config = {
+        "arch": arch, "version": 1,
         "input_size": [256, 256],
         "external_input_channels": ["H", "TX", "F"],
         "network_input_channels": ["H", "TX", "F", "rho"],
@@ -63,6 +65,28 @@ def lunar_model_config():
         "training": {"phase": "single", "frozen_parameters": False,
                      "uses_old_firstU": False},
     }
+    if arch == "lunar_maxvit_fade":
+        config["decoder"]["upsample"] = {
+            "first_two_stages": {"name": "ConvTranspose2d", "kernel_size": 4,
+                                 "stride": 2, "padding": 1, "activation": "ReLU"},
+            "last_three_stages": {
+                "name": "FADE_L2H", "output_resolutions": [64, 128, 256],
+                "guidance_sources": ["encoder_block1", "encoder_stem", "full_resolution_branch"],
+                "output_channels": [64, 32, 16],
+                "scale": 2, "reassembly_kernel_size": 5,
+                "content_kernel_size": 3, "embedding_dim": 64,
+                "coarse_projection": "Conv2d_1x1_to_output_channels",
+                "guide_projection": "Conv2d_1x1_to_output_channels",
+                "kernel_generator": "joint_semi_shift_softmax",
+                "gate": "sigmoid_of_coarse_1x1_then_nearest_upsample",
+                "fusion": "gate*guide+(1-gate)*reassembled_coarse",
+                "padding": "zero", "implementation": "pure_torch_bounded_memory",
+                "initialization": "FADE_xavier_uniform_bias_zero",
+            },
+        }
+        config["decoder"]["fusion"] = (
+            "first_two_concat_then_double_conv;last_three_FADE_then_double_conv")
+    return config
 
 
 def _double_conv(in_channels, out_channels):
@@ -87,6 +111,29 @@ class _DecoderBlock(nn.Module):
         return self.fuse(torch.cat((self.up(input), skip), dim=1))
 
 
+class _FADEDecoderBlock(nn.Module):
+    """Project coarse/context and high-resolution guidance before joint FADE.
+
+    The gate already fuses the guide; no second concatenation duplicates it.
+    Learned projections do not force height/clearance contours onto the output.
+    """
+    def __init__(self, in_channels, skip_channels, out_channels):
+        super().__init__()
+        from fade import FADE
+        self.coarse_projection = nn.Conv2d(in_channels, out_channels, 1)
+        self.guide_projection = nn.Conv2d(skip_channels, out_channels, 1)
+        for projection in (self.coarse_projection, self.guide_projection):
+            nn.init.xavier_uniform_(projection.weight)
+            nn.init.zeros_(projection.bias)
+        self.up = FADE(out_channels, kernel_size=5, embedding_dim=64)
+        self.fuse = _double_conv(out_channels, out_channels)
+
+    def forward(self, input, skip):
+        coarse = self.coarse_projection(input)
+        guide = self.guide_projection(skip)
+        return self.fuse(self.up(guide, coarse))
+
+
 class LunarMaxViT(nn.Module):
     """Jointly trained, full-map predictor using only test-available inputs.
 
@@ -100,7 +147,7 @@ class LunarMaxViT(nn.Module):
     is O(B*sum(N_s*heads_s*P)). Training also retains layer/decoder activations.
     """
 
-    def __init__(self, feature_config):
+    def __init__(self, feature_config, arch="lunar_maxvit"):
         super().__init__()
         if not isinstance(feature_config, dict):
             raise ValueError("LunarMaxViT requires LOS/distance feature_config")
@@ -109,11 +156,11 @@ class LunarMaxViT(nn.Module):
         if "los" not in feature_config or "distance" not in feature_config:
             raise ValueError("LunarMaxViT requires both LOS and distance configuration")
 
-        self.arch = "lunar_maxvit"
+        self.model_config = lunar_model_config(arch)
+        self.arch = arch
         self.phase = "single"
         self.base_inputs = 2
         self.feature_config = feature_config
-        self.model_config = lunar_model_config()
         self.encoder = MaxVit(
             input_size=(256, 256), stem_channels=64, partition_size=8,
             block_channels=[64, 128, 256, 512], block_layers=[2, 2, 5, 2],
@@ -131,12 +178,13 @@ class LunarMaxViT(nn.Module):
         self.encoder.classifier = nn.Identity()
 
         self.full_resolution = _double_conv(4, 16)
+        final_block = _FADEDecoderBlock if arch == "lunar_maxvit_fade" else _DecoderBlock
         self.decoder = nn.ModuleList([
             _DecoderBlock(512, 256, 256),
             _DecoderBlock(256, 128, 128),
-            _DecoderBlock(128, 64, 64),
-            _DecoderBlock(64, 64, 32),
-            _DecoderBlock(32, 16, 16),
+            final_block(128, 64, 64),
+            final_block(64, 64, 32),
+            final_block(32, 16, 16),
         ])
         self.output = nn.Sequential(nn.Conv2d(16 + 4, 1, 3, padding=1),
                                     nn.ReLU(inplace=True))

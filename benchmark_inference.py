@@ -9,7 +9,7 @@ timing check, not an official challenge certification or a throughput test.
     python benchmark_inference.py --data-root LunarRM --ckpt runs/model_best.pt \
         --samples 16 --out results/inference_timing.json
 
-Omit --ckpt to benchmark the same architecture with random weights. That mode
+Omit --ckpt to benchmark --arch (default lunar_maxvit) with random weights. That mode
 does not establish prediction quality. This script never trains or writes a
 checkpoint.
 """
@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from los_features import clearance_feature
-from model_factory import (build_model, checkpoint_architecture,
+from model_factory import (LUNAR_ARCHITECTURES, build_model, checkpoint_architecture,
                            checkpoint_input_config, load_checkpoint,
                            model_feature_config, output_index)
 from radiounet import feature_config_for_mode
@@ -150,15 +150,17 @@ def main(args):
         torch.cuda.manual_seed_all(args.seed)
 
     checkpoint = None
-    arch, phase = "lunar_maxvit", "single"
+    arch, phase = args.arch or "lunar_maxvit", "single"
     first_features, second_features = "none", "none"
     saved_config = None
     band = args.band or "58"
     if args.ckpt:
         checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=False)
         arch = checkpoint_architecture(checkpoint)
-        if arch != "lunar_maxvit":
-            raise ValueError("This benchmark is for independent lunar_maxvit checkpoints")
+        if arch not in LUNAR_ARCHITECTURES:
+            raise ValueError("This benchmark is for independent lunar_maxvit variant checkpoints")
+        if args.arch is not None and args.arch != arch:
+            raise ValueError("--arch differs from the checkpoint architecture")
         saved = checkpoint.get("args", {})
         phase = saved.get("phase", "single")
         saved_band = saved.get("band")
@@ -267,7 +269,9 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--ckpt", default=None,
-                        help="trained lunar_maxvit checkpoint; omit for random-weight timing only")
+                        help="trained lunar_maxvit variant checkpoint; omit for random-weight timing only")
+    parser.add_argument("--arch", choices=LUNAR_ARCHITECTURES, default=None,
+                        help="defaults to checkpoint architecture, or lunar_maxvit for random weights")
     parser.add_argument("--band", choices=["415", "58"], default=None,
                         help="defaults to checkpoint band, or 58 for random weights")
     parser.add_argument("--split", choices=["train", "val", "test"], default="val")

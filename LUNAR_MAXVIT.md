@@ -1,5 +1,9 @@
 # Lunar MaxViT: independent encoder/decoder
 
+Latest candidate: [LunarMaxViT + FADE](LUNAR_MAXVIT_FADE.md), using the separate
+`lunar_maxvit_fade` architecture and a single seed-0 run. The AdamW experiment
+below is retained as its completed control (best 5.097016 dB).
+
 An experimental, single-stage replacement for the two-U-Net model. It is inspired
 by [RMTransformer](https://arxiv.org/html/2501.05190v2), rather than a reproduction
 of its urban-data experiment. The completed seed-0 Adam run achieved **5.11214 dB**
