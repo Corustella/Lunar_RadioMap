@@ -2,8 +2,9 @@
 
 An experimental, single-stage replacement for the two-U-Net model. It is inspired
 by [RMTransformer](https://arxiv.org/html/2501.05190v2), rather than a reproduction
-of its urban-data experiment. A lower lunar validation RMSE has **not** yet been
-demonstrated. The original `RadioUNet/modules.py` and LOS-distance baseline remain
+of its urban-data experiment. The completed seed-0 Adam run achieved **5.11214 dB**
+on the fixed validation set, versus 5.41621 dB for LOS + distance seed 0. This
+compares complete architectures/training budgets, not attention in isolation. The original `RadioUNet/modules.py` and LOS-distance baseline remain
 available.
 
 ## Selective reuse and lunar adaptation
@@ -82,29 +83,84 @@ Record the actual torch/torchvision/CUDA versions. The known torchvision
 `meshgrid` future-interface warning is not a training error; do not change model
 logic just to suppress it.
 
-## Commit the local implementation
+## Controlled AdamW experiment (2026-10-17)
 
-The current worktree includes the previously authorized LOS-baseline restoration
-and this new model. Review both before committing. The following PowerShell
-commands stage tracked changes and the four new implementation files; ignored
-`docs/` and repository-external experiments stay out of the commit.
+The current decision is **one seed, seed 0**, from scratch, training the complete
+encoder and decoder. Keep the model, H/TX/F/rho, D4 augmentation, masked MSE,
+batch 16, 150 epochs, lr=1e-4, cosine floor 1e-6, AMP and stochastic depth unchanged.
+Only replace Adam with AdamW and weight decay 0.05. No parameter scan is scheduled.
+
+The existing run's best was epoch 45 (zero-based), 5.11214 dB; last was 5.50939 dB.
+Training loss fell another 34.07% after best. This motivates a regularization test,
+but does not prove that missing weight decay caused the validation degradation.
+[AdamW](https://arxiv.org/abs/1711.05101) supports decoupled weight decay in adaptive
+optimization; [MaxViT](https://arxiv.org/abs/2204.01697) used AdamW/0.05 in its
+ImageNet classification recipe. Neither establishes lunar regression efficacy.
+The intended improvement is a **research hypothesis**.
+
+`--optimizer adam` and `--weight-decay 0` remain the defaults for old commands.
+For AdamW, only Conv2d/ConvTranspose2d/Linear weights decay (35,146,228 parameters).
+Biases, normalization parameters and 22 relative-position bias tables do not
+(171,961 parameters). Betas remain (0.9, 0.999), eps 1e-8. Optimizer configuration
+and ordered parameter names are saved in checkpoint, provenance and summary.
+Resume checks the optimizer and decay groups before restoring state. Legacy Adam
+checkpoints can resume as Adam, but cannot be silently resumed as AdamW. New
+runs reject existing outputs unless resume is explicit. `--resume auto` rejects
+partial output directories with no last checkpoint; use a new directory instead.
+
+AdamW implements the additional update `w <- (1 - lr * weight_decay) * w` on the
+selected parameters. Update time and optimizer-state memory remain O(P), where
+P is parameter count. The inference graph and parameter count are unchanged.
+The user's earlier random-weight server benchmark was mean 22.61 ms, p95 23.51 ms
+for 16 samples, including live F and transfers. This is prior measured evidence,
+not a new benchmark or official 500 ms certification.
+
+## Automatically saved diagnostic artifacts
+
+- `<run>_history.csv`: retains the existing train loss; adds accumulated online
+  masked SSE/count, normalized MSE and dB RMSE. These use augmented training data,
+  train mode and changing weights, so they are not a fixed-checkpoint train score.
+  Old history rows leave the newly introduced measurements blank on resume.
+- `<run>_curves.png/.pdf/.json`: objective, train-online/val pooled RMSE, learning
+  rate; refreshed every five epochs and at completion (`--plots-every 0` disables).
+  No smoothing or interpolation of missing measurements.
+- `<run>_best_epoch<N>_panels.png`: separately loads best at completion, with the
+  same AMP setting as validation. Periodic panels still show the latest snapshot.
+  Invalid target/error pixels are gray; the model still outputs the full map.
+- `val.json`: per-sample terrain_id, valid pixel count and masked SSE in dB^2,
+  allowing later terrain aggregation without averaging per-image RMSE.
+- `val_rmse_distribution.png/.pdf/.json`: equal-weight sample histogram and ECDF,
+  with pooled pixel score labeled separately (`evaluate.py --no-plots` disables).
+  Samples sharing terrain are correlated; no independence or significance claims.
+
+Plots use the existing Matplotlib dependency; no additional inference is needed
+for curves/distributions. Plotting costs O(E) for E epochs and O(N log N) for N
+validation samples, with O(E) or O(N) auxiliary memory. The best panel export adds
+one forward pass on the selected few samples, not a second full validation.
+
+## Local commit and push
+
+The changes are limited to optimizer configuration, logging/figures and this
+run document. Ignored `docs/` and repository-external diagnostics stay local.
+Run in local PowerShell after reviewing the diff:
 
 ```powershell
 cd D:\codes\LunarRadiomap\lunar-radiomap-challenge
 git diff --stat
-git add -u
-git add lunar_maxvit.py model_factory.py benchmark_inference.py LUNAR_MAXVIT.md
+git add train.py evaluate.py analysis_plots.py LUNAR_MAXVIT.md
 git diff --cached --stat
-git commit -m "Restore LOS baseline and add lunar MaxViT encoder-decoder"
+git commit -m "Add controlled AdamW training and diagnostic figures"
 git push origin main
 ```
 
-## Server sync, timing and smoke check
+## Server sync and formal seed-0 training
 
-Run these on the SSH GPU server after confirming/activating its training
-environment. These commands are provided for the user; Codex has not run them
-on the server. Use new result/run paths. The repository/data paths below follow
-the existing project convention.
+Use the already activated training environment (the previous prompt was `gc1`).
+These commands are provided for the user; Codex has not run them on the server.
+Reuse the existing F cache; the architecture/input definition has not changed.
+No extra server smoke run is required for this proposal. Previous downloaded
+training epoch times totaled about 3.42 hours; allow roughly 3-4 hours plus I/O
+and load-dependent overhead, rather than treating this as a duration guarantee.
 
 ```bash
 cd ~/liuanda/lunar-radiomap-challenge
@@ -112,83 +168,40 @@ git status
 git switch main
 git pull --ff-only
 
-python benchmark_inference.py \
-  --data-root ~/liuanda/LunarRM --band 58 --device cuda \
-  --samples 16 --warmup 3 \
-  --out results/lunar_maxvit_v1/inference_random.json
-```
-
-This benchmark needs no F cache: each distinct sample constructs F live, then
-runs the whole network including rho and transfers a complete dB prediction to
-CPU. It reports feature/network/output and total batch-one latency; disk input
-reads are separately reported, including an input-read-plus-total column. Model
-startup and warm-up are excluded. The JSON contains timing boundaries, metadata,
-actual loader, environment and per-sample results. Random weights establish cost,
-not accuracy. These measurements are not official certification or a worst-case
-guarantee. The script rejects existing output paths.
-
-Reuse the existing complete F cache. If the path below is not the existing cache
-location, point both commands to its actual directory. The cache builder verifies
-metadata/index and reuses complete splits; it never silently overwrites an
-incomplete or mismatched cache. A new full cache costs substantially more than a
-small smoke check.
-
-```bash
-python build_los_cache.py \
-  --data-root ~/liuanda/LunarRM --cache-root results/los_cache_v1 \
-  --splits train val --device cuda
-
 python train.py \
   --data-root ~/liuanda/LunarRM --los-cache results/los_cache_v1 \
   --arch lunar_maxvit --band 58 --loss masked \
-  --epochs 1 --batch-size 16 --limit-batches 1 \
-  --num-workers 8 --device cuda --panels 0 --seed 0 \
-  --out runs/lunar_maxvit_v1_smoke --run-name lunar_maxvit_smoke
+  --optimizer adamw --weight-decay 0.05 \
+  --epochs 150 --batch-size 16 --lr 1e-4 \
+  --lr-sched cosine --lr-min 1e-6 \
+  --num-workers 8 --device cuda --amp --seed 0 \
+  --init-from none --resume auto \
+  --panels 6 --panels-every 5 --plots-every 5 \
+  --out runs/lunar_maxvit_adamw_v1/seed0 \
+  --run-name lunar_maxvit_58_masked_single_los_distance_adamw
+
+python evaluate.py \
+  --data-root ~/liuanda/LunarRM --los-cache results/los_cache_v1 \
+  --ckpt runs/lunar_maxvit_adamw_v1/seed0/lunar_maxvit_58_masked_single_los_distance_adamw_best.pt \
+  --split val --batch-size 16 --num-workers 8 --device cuda --amp \
+  --out results/lunar_maxvit_adamw_v1/seed0/val.json
 ```
 
-Timing and the smoke check should take seconds to minutes depending on hardware
-and storage. The smoke test verifies one real batch and one validation batch,
-not an accuracy result. Do not resume its weights for formal training. If memory
-or AMP fails, diagnose it before altering batch size or optimizer settings.
-The full-model training duration is unknown until measured; do not infer it
-from the old secondU timing.
+The new directory starts from scratch. Re-running the same training command
+resumes only this AdamW run's last checkpoint; it does not resume the original
+Adam experiment. Training retains the existing non-exact-RNG resume behavior.
 
-## Formal paired run, after the checks pass
-
-Only one architecture is proposed. Seeds 0/1 are trained and analyzed together,
-each for a single 150-epoch phase, using the existing Adam, lr=1e-4, cosine to
-1e-6, batch 16, AMP and D4 protocol. This is a new complete training configuration,
-not a claim that these settings are optimal for all Transformers. The old model
-used two stages, so this comparison does not isolate attention from capacity or
-training cost. Do not add another grid of decoders/losses before reading results.
-
-```bash
-for seed in 0 1; do
-  python train.py \
-    --data-root ~/liuanda/LunarRM --los-cache results/los_cache_v1 \
-    --arch lunar_maxvit --band 58 --loss masked \
-    --epochs 150 --batch-size 16 --lr 1e-4 \
-    --lr-sched cosine --lr-min 1e-6 \
-    --num-workers 8 --device cuda --seed "$seed" \
-    --out "runs/lunar_maxvit_v1/seed${seed}" \
-    --run-name lunar_maxvit_58_masked_single_los_distance || break
-
-  python evaluate.py \
-    --data-root ~/liuanda/LunarRM --los-cache results/los_cache_v1 \
-    --ckpt "runs/lunar_maxvit_v1/seed${seed}/lunar_maxvit_58_masked_single_los_distance_best.pt" \
-    --split val --batch-size 16 --num-workers 8 --device cuda \
-    --out "results/lunar_maxvit_v1/seed${seed}/val.json" || break
-done
-```
-
-After training, repeat the batch-one benchmark with `--ckpt` and a new JSON path.
-Primary comparison is the full official validation pooled valid-pixel RMSE in
-dB. Both seeds, per-terrain SSE/count and the previously defined high-change
-regions should be analyzed together. Small-sample interface tests and visual
-sharpness cannot substitute for that score. Do not promise <4 dB from the urban
-paper's reported relative improvement.
+Compare **new best with old best 5.11214 dB**, not with old last 5.50939 dB.
+The practical next-step gate is at least 0.10 dB global improvement together with
+improvement in the existing high-change regions (10 dB adjacent valid-pixel
+change, Chebyshev radius 3, intersected with the official mask). This is a
+budget decision threshold, not statistical significance. Only seed 0 is scheduled;
+no cross-seed stability or hidden-test generalization conclusion is available.
+If best does not materially improve, do not automatically scan weight decay or
+launch further seeds. Existing best checkpoints are retained.
 
 Sources: [RMTransformer](https://arxiv.org/html/2501.05190v2),
 [MaxViT](https://arxiv.org/abs/2204.01697),
 [author code](https://github.com/google-research/maxvit),
-[torchvision implementation](https://docs.pytorch.org/vision/main/_modules/torchvision/models/maxvit.html).
+[torchvision implementation](https://docs.pytorch.org/vision/main/_modules/torchvision/models/maxvit.html),
+[AdamW](https://arxiv.org/abs/1711.05101).

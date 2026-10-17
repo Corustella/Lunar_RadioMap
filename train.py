@@ -66,10 +66,12 @@ Examples
 import argparse
 import csv
 import json
+import math
 import os
 import random
 import sys
 import time
+import tempfile
 import warnings
 
 import numpy as np
@@ -85,6 +87,7 @@ from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATUR
 from model_factory import (ARCHITECTURES, build_model, load_checkpoint,
                            model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
+from analysis_plots import save_training_curves
 
 
 def load_dataset_module(data_root):
@@ -102,6 +105,89 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def build_optimizer(model, name, lr, weight_decay):
+    """Keep legacy Adam ordering; decay only Conv/Linear weights with AdamW.
+
+    Biases, normalization scales and relative-position tables do not decay.
+    Named groups are recorded so resume cannot silently remap optimizer state.
+    Construction is O(P); Adam and AdamW both retain O(P) optimizer state.
+    """
+    named = dict(model.named_parameters())
+    if name == "adam":
+        if weight_decay != 0:
+            raise ValueError("Use --optimizer adamw for decoupled --weight-decay")
+        groups = [list(named)]
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        policy = "legacy_all_parameters"
+    else:
+        decay_ids = {id(module.weight) for module in model.modules()
+                     if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear))}
+        groups = [[n for n, p in named.items() if id(p) in decay_ids],
+                  [n for n, p in named.items() if id(p) not in decay_ids]]
+        opt = torch.optim.AdamW([
+            {"params": [named[n] for n in groups[0]], "weight_decay": weight_decay},
+            {"params": [named[n] for n in groups[1]], "weight_decay": 0.0},
+        ], lr=lr)
+        policy = "conv_linear_weights_only_v1"
+    config = {"name": name, "weight_decay": weight_decay, "policy": policy,
+              "betas": [0.9, 0.999], "eps": 1e-8,
+              "groups": [{"parameter_names": names,
+                          "parameters": sum(named[n].numel() for n in names),
+                          "weight_decay": opt.param_groups[i]["weight_decay"]}
+                         for i, names in enumerate(groups)]}
+    return opt, config
+
+
+def check_optimizer_resume(checkpoint, config):
+    """Validate before loading: load_state_dict overwrites group hyperparameters."""
+    saved = checkpoint.get("optimizer_config")
+    if saved is None:
+        # Historical checkpoints predate optimizer selection and use plain Adam.
+        previous = checkpoint.get("args", {})
+        if (config["name"] != "adam" or config["weight_decay"] != 0 or
+                previous.get("optimizer", "adam") != "adam" or
+                previous.get("weight_decay", 0.0) != 0):
+            raise ValueError("Legacy checkpoint requires Adam with weight_decay=0; start a new run")
+    elif saved != config:
+        raise ValueError("Resume optimizer type, decay policy or parameter groups differ; start a new run")
+    actual = checkpoint["opt"]["param_groups"]
+    if len(actual) != len(config["groups"]):
+        raise ValueError("Resume optimizer group count differs")
+    for old, wanted in zip(actual, config["groups"]):
+        if (old.get("weight_decay", 0.0) != wanted["weight_decay"] or
+                len(old["params"]) != len(wanted["parameter_names"]) or
+                list(old["betas"]) != config["betas"] or old["eps"] != config["eps"] or
+                old.get("amsgrad", False) or old.get("maximize", False) or
+                (config["name"] == "adam" and old.get("decoupled_weight_decay", False)) or
+                (config["name"] == "adamw" and old.get("decoupled_weight_decay") is False)):
+            raise ValueError("Resume optimizer state conflicts with requested settings")
+
+
+def append_history(path, row, fresh=False):
+    """Extend legacy CSV columns atomically; unmeasured old values stay blank."""
+    fields = list(row)
+    if not fresh and os.path.exists(path):
+        with open(path, newline="") as handle:
+            reader = csv.DictReader(handle)
+            previous_fields = reader.fieldnames or []
+            if previous_fields != fields:
+                previous = list(reader)
+        if previous_fields != fields:
+            fields = previous_fields + [k for k in fields if k not in previous_fields]
+            with tempfile.NamedTemporaryFile(mode="w", newline="", dir=os.path.dirname(path),
+                                             suffix=".csv", delete=False) as handle:
+                temporary = handle.name
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(previous)
+            os.replace(temporary, path)
+    with open(path, "w" if fresh or not os.path.exists(path) else "a", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if fresh or handle.tell() == 0:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def resolve_init_from(args):
@@ -179,7 +265,7 @@ def validate(model, loader, device, scale, amp, out_idx, limit=0):
 
 @torch.no_grad()
 def write_panels(model, dataset, indices, device, out_idx, lo, scale,
-                 path, err_lim):
+                 path, err_lim, amp=False):
     """Render a FIXED set of validation samples, so the panels show the same maps
     improving rather than a different random draw each time."""
     model.eval()
@@ -196,15 +282,20 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
     x = torch.stack(xs).to(device)
     y = torch.stack(ys).to(device)
     m = torch.stack(ms).to(device) if ms else None
-    out = model(x)
+    with torch.autocast("cuda", enabled=amp and device.type == "cuda"):
+        out = model(x)
     # out2 is a direct prediction; the plot shows its difference from firstU.
     base = out[0].float() if out_idx == 1 else None
     return save_example_panels(path, x, out[out_idx].float(), y, m, lo, scale,
                                names, max_examples=len(indices), base=base,
-                               err_lim=err_lim)
+                               err_lim=err_lim, mask_invalid=True)
 
 
 def prepare_args(args):
+    if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
+        raise ValueError("--weight-decay must be finite and nonnegative")
+    if args.optimizer == "adam" and args.weight_decay != 0:
+        raise ValueError("Nonzero --weight-decay requires --optimizer adamw")
     if args.phase is None:
         args.phase = "single" if args.arch == "lunar_maxvit" else "firstU"
     output_index(args.arch, args.phase)
@@ -261,7 +352,9 @@ def main(args):
     n_total = sum(p.numel() for p in model.parameters())
     print(f"trainable params {n_train:,} / {n_total:,} ({args.arch}, {args.phase})")
 
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    opt, optimizer_config = build_optimizer(model, args.optimizer, args.lr, args.weight_decay)
+    print(f"optimizer {args.optimizer}, weight_decay={args.weight_decay:g}, "
+          f"policy={optimizer_config['policy']}")
 
     if args.lr_sched == "cosine":
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -275,6 +368,8 @@ def main(args):
     ckpt_last = os.path.join(args.out, f"{args.run_name}_last.pt")
     ckpt_best = os.path.join(args.out, f"{args.run_name}_best.pt")
     hist_path = os.path.join(args.out, f"{args.run_name}_history.csv")
+    if not args.resume and any(os.path.exists(p) for p in (ckpt_last, ckpt_best, hist_path)):
+        raise FileExistsError("Run outputs already exist; use a new --out/--run-name or explicit --resume")
 
     start_epoch = 0
     best = float("inf")
@@ -292,6 +387,7 @@ def main(args):
                     previous.get("band", args.band) != args.band):
                 raise ValueError("Resume requires the same loss, phase and band; use --init-from for a new stage")
             checkpoint_sources["resume"] = path
+            check_optimizer_resume(ck, optimizer_config)
             weight_loading = load_checkpoint(model, ck)
             opt.load_state_dict(ck["opt"])
             if ck.get("scaler"):
@@ -323,6 +419,8 @@ def main(args):
         elif args.resume != "auto":
             raise FileNotFoundError(path)
         else:
+            if any(os.path.exists(p) for p in (ckpt_best, hist_path)):
+                raise FileExistsError("No last checkpoint but run artifacts exist; use a new output path")
             print("no checkpoint to resume; starting fresh")
 
 
@@ -348,6 +446,7 @@ def main(args):
     provenance["second_features"] = args.second_features
     provenance["feature_config"] = feature_config
     provenance["model_config"] = model.model_config
+    provenance["optimizer_config"] = optimizer_config
     if args.arch == "lunar_maxvit":
         from importlib.metadata import version
         provenance["environment"]["torchvision"] = version("torchvision")
@@ -370,11 +469,12 @@ def main(args):
           f"arch={args.arch} phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
           f"first_features={args.first_features} second_features={args.second_features}")
 
-    hist_cols = None
     for epoch in range(start_epoch, args.epochs):
         model.train()
         t0 = time.time()
         running, seen = 0.0, 0
+        train_sse = torch.zeros((), device=device, dtype=torch.float64)
+        train_valid = torch.zeros((), device=device, dtype=torch.float64)
         for i, batch in enumerate(train_loader):
             x, y, m = unpack(batch, device)
             opt.zero_grad(set_to_none=True)
@@ -388,6 +488,12 @@ def main(args):
             scaler.step(opt)
             scaler.update()
 
+            # Detached online diagnostic: augmented data, train mode, changing
+            # weights. It is not an eval-mode score of a fixed train checkpoint.
+            with torch.no_grad():
+                se = (pred.detach().float() - y.float()).square()
+                train_sse += (se * m).sum(dtype=torch.float64)
+                train_valid += m.sum(dtype=torch.float64)
             running += loss.item() * x.size(0)
             seen += x.size(0)
             if args.log_every and i % args.log_every == 0:
@@ -403,6 +509,8 @@ def main(args):
         metrics = validate(model, val_loader, device, scale, args.amp, out_idx,
                            limit=args.limit_batches)
         train_loss = running / max(seen, 1)
+        valid_pixels = int(train_valid.item())
+        online_mse = train_sse.item() / valid_pixels if valid_pixels else float("nan")
         dt = time.time() - t0
         # the ranking metric leads, all-pixel RMSE trails as a diagnostic
         msg = (f"epoch {epoch}: train_loss {train_loss:.6f}  "
@@ -414,24 +522,17 @@ def main(args):
 
         row = {"epoch": epoch, "train_loss": train_loss, "lr": epoch_lr,
                "epoch_seconds": round(dt, 1),
+               "train/mse_masked_online": online_mse,
+               "train/rmse_db_masked_online": math.sqrt(online_mse) * scale,
+               "train/valid_pixels": valid_pixels,
                **{k: v for k, v in metrics.items()}}
-        if hist_cols is None:
-            hist_cols = list(row)
-            new_file = not os.path.exists(hist_path) or start_epoch == 0
-            with open(hist_path, "w" if new_file else "a", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=hist_cols)
-                if new_file:
-                    w.writeheader()
-                w.writerow(row)
-        else:
-            with open(hist_path, "a", newline="") as f:
-                csv.DictWriter(f, fieldnames=hist_cols).writerow(row)
+        append_history(hist_path, row, fresh=epoch == 0 and not resumed)
 
         if panel_idx and args.panels_every and epoch % args.panels_every == 0:
             write_panels(model, val_loader.dataset, panel_idx, device, out_idx, lo,
                          scale,
                          os.path.join(args.out, f"{args.run_name}_panels.png"),
-                         args.panel_err_lim)
+                         args.panel_err_lim, args.amp)
 
         # Always select on the ranking metric, even for a --loss plain ablation.
         # Selecting a plain run on all-pixel RMSE would pick the checkpoint that
@@ -445,16 +546,29 @@ def main(args):
                  "sched": sched.state_dict(), "lr_sched": args.lr_sched,
                  "epoch": epoch, "best": best, "args": vars(args),
                  "metrics": metrics, "feature_config": feature_config,
-                 "model_config": model.model_config}
+                 "model_config": model.model_config, "optimizer_config": optimizer_config}
         torch.save(state, ckpt_last)
         if improved:
             torch.save(state, ckpt_best)
             print(f"  new best {best:.4f} dB -> {ckpt_best}")
+        if args.plots_every and (epoch % args.plots_every == 0 or epoch == args.epochs - 1):
+            save_training_curves(hist_path, os.path.join(args.out, f"{args.run_name}_curves.png"))
+
+    # Separate best panels from the rolling snapshot; use validation AMP mode.
+    if panel_idx and os.path.exists(ckpt_best):
+        selected = torch.load(ckpt_best, map_location="cpu", weights_only=False)
+        load_checkpoint(model, selected)
+        best_epoch = selected["epoch"]
+        del selected
+        path = os.path.join(args.out, f"{args.run_name}_best_epoch{best_epoch}_panels.png")
+        write_panels(model, val_loader.dataset, panel_idx, device, out_idx, lo, scale,
+                     path, args.panel_err_lim, args.amp)
 
     with open(os.path.join(args.out, f"{args.run_name}_summary.json"), "w") as f:
         json.dump({"run": args.run_name, "band": args.band, "loss": args.loss,
                    "phase": args.phase, "arch": args.arch, "init_from": args.init_from,
                    "model_config": model.model_config,
+                   "optimizer_config": optimizer_config,
                    "first_features": args.first_features,
                    "second_features": args.second_features, "feature_config": feature_config,
                    "selection_metric": "val/rmse_db_masked",
@@ -486,6 +600,10 @@ def build_parser():
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--optimizer", default="adam", choices=["adam", "adamw"],
+                   help="legacy Adam by default; AdamW enables decoupled weight decay")
+    p.add_argument("--weight-decay", type=float, default=0.0,
+                   help="AdamW decay of Conv/Linear weights only; bias/norm/position bias excluded")
     p.add_argument("--lr-sched", default="cosine", choices=["cosine", "step"])
     p.add_argument("--lr-min", type=float, default=1e-6, help="cosine floor")
     p.add_argument("--lr-step", type=int, default=20, help="--lr-sched step only")
@@ -513,6 +631,8 @@ def build_parser():
     p.add_argument("--panels", type=int, default=6,
                    help="validation examples rendered to <run>_panels.png (0 off)")
     p.add_argument("--panels-every", type=int, default=5)
+    p.add_argument("--plots-every", type=int, default=5,
+                   help="save training curves every N epochs and at completion (0 disables)")
     p.add_argument("--panel-err-lim", type=float, default=10.0,
                    help="fixed +/- dB colour scale for the panel error map, so "
                         "panels stay comparable across epochs")

@@ -49,6 +49,7 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from metrics import MetricAccumulator, save_example_panels, ssim  
+from analysis_plots import save_rmse_distribution
 from radiounet import feature_config_for_mode  # noqa: E402
 from model_factory import (build_model, checkpoint_architecture, checkpoint_input_config,
                            load_checkpoint, model_feature_config, output_index, uses_los)
@@ -209,8 +210,12 @@ def main(args):
                 row = {"sample_id": name.rsplit("_", 1)[0], "band": bands[j],
                        "rmse_db": float(rmse_db[j]), "psnr_db": float(psnr[j]),
                        "ssim": float(ssim_v[j])}
+                i_row, _ = base.samples[start_index + j]
+                row["terrain_id"] = base.rows[i_row]["terrain_id"]
                 if m is not None:
                     mj = m[j] > 0
+                    row["valid_pixels"] = int(mj.sum())
+                    row["sse_db2_masked"] = float(se_n[j][mj].sum(dtype=torch.float64) * scale**2)
                     if mj.any():
                         row["rmse_db_masked"] = float((se_n[j][mj].mean() ** 0.5) * scale)
                         row["valid_frac"] = float(mj.float().mean())
@@ -252,7 +257,7 @@ def main(args):
                 torch.stack([s["mask"] for s in samples]) if need_mask else None,
                 lo, scale, [s["name"] for s in samples], max_examples=len(samples),
                 base=torch.stack([s["base"] for s in samples]) if out_idx == 1 else None,
-                err_lim=args.panel_err_lim)
+                err_lim=args.panel_err_lim, mask_invalid=need_mask)
             if p:
                 print(f"wrote {p}")
 
@@ -264,6 +269,9 @@ def main(args):
             json.dump({"summary": summary, "per_band": per_band,
                        "per_sample": per_sample}, f, indent=2)
         print(f"wrote {args.out}")
+        if need_mask and not args.no_plots:
+            path = os.path.splitext(args.out)[0] + "_rmse_distribution.png"
+            save_rmse_distribution(path, per_sample, summary, args.out)
 
 
 def build_parser():
@@ -291,6 +299,7 @@ def build_parser():
     p.add_argument("--limit", type=int, default=0, help="stop after ~N samples")
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--out", default=None, help="results JSON")
+    p.add_argument("--no-plots", action="store_true", help="disable RMSE distribution PNG/PDF")
     p.add_argument("--panels", type=int, default=8,
                    help="example panels to render (0 disables)")
     p.add_argument("--panels-out", default=None)
