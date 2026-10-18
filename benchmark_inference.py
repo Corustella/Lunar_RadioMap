@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from los_features import clearance_feature
-from model_factory import (LUNAR_ARCHITECTURES, build_model, checkpoint_architecture,
+from model_factory import (ARCHITECTURES, RADIO_ARCHITECTURES, build_model, checkpoint_architecture,
                            checkpoint_input_config, load_checkpoint,
                            model_feature_config, output_index)
 from radiounet import feature_config_for_mode
@@ -152,13 +152,13 @@ def main(args):
     checkpoint = None
     arch, phase = args.arch or "lunar_maxvit", "single"
     first_features, second_features = "none", "none"
+    if arch in RADIO_ARCHITECTURES:
+        phase, first_features, second_features = "secondU", "los", "los_distance"
     saved_config = None
     band = args.band or "58"
     if args.ckpt:
         checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=False)
         arch = checkpoint_architecture(checkpoint)
-        if arch not in LUNAR_ARCHITECTURES:
-            raise ValueError("This benchmark is for independent lunar_maxvit variant checkpoints")
         if args.arch is not None and args.arch != arch:
             raise ValueError("--arch differs from the checkpoint architecture")
         saved = checkpoint.get("args", {})
@@ -170,6 +170,9 @@ def main(args):
             raise ValueError("--band differs from the checkpoint's trained band")
         band = saved_band
         first_features, second_features, saved_config = checkpoint_input_config(checkpoint)
+    if arch in RADIO_ARCHITECTURES and (phase != "secondU" or
+            first_features != "los" or second_features != "los_distance"):
+        raise ValueError("RadioWNet timing requires the complete LOS+distance secondU model")
     out_idx = output_index(arch, phase)
 
     ld = load_dataset_module(args.data_root)
@@ -269,8 +272,8 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--ckpt", default=None,
-                        help="trained lunar_maxvit variant checkpoint; omit for random-weight timing only")
-    parser.add_argument("--arch", choices=LUNAR_ARCHITECTURES, default=None,
+                        help="lunar_maxvit or LOS+distance RadioWNet checkpoint; omit for random-weight timing")
+    parser.add_argument("--arch", choices=ARCHITECTURES, default=None,
                         help="defaults to checkpoint architecture, or lunar_maxvit for random weights")
     parser.add_argument("--band", choices=["415", "58"], default=None,
                         help="defaults to checkpoint band, or 58 for random weights")

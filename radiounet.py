@@ -216,7 +216,7 @@ def _expand_inputs(model, names, added):
 
 
 def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=None,
-              first_features="none"):  # noqa: N802
+              first_features="none", _model_class=None):  # noqa: N802
     """Build the upstream model with LOS and optional secondU log-distance.
 
     State keys and the upstream forward remain unchanged. A both-stage model
@@ -235,7 +235,8 @@ def RadioWNet(inputs=2, phase="firstU", second_features="none", feature_config=N
                              "feature_config": feature_config})
     elif feature_config is not None:
         raise ValueError("feature_config is only used by expanded models")
-    model = load_module().RadioWNet(inputs=inputs, phase=phase)
+    model_class = load_module().RadioWNet if _model_class is None else _model_class
+    model = model_class(inputs=inputs, phase=phase)
     model.base_inputs = inputs
     model.first_features = first_features
     model.second_features = second_features

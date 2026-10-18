@@ -300,6 +300,11 @@ def prepare_args(args):
     if args.phase is None:
         args.phase = "single" if args.arch in LUNAR_ARCHITECTURES else "firstU"
     output_index(args.arch, args.phase)
+    if args.arch == "radiownet_tx_direction":
+        if args.band == "both" or args.first_features != "los" or args.second_features != "los_distance":
+            raise ValueError("TX direction requires one band, --first-features los --second-features los_distance")
+        if args.init_from in (None, "auto"):
+            raise ValueError("TX direction requires an explicit historical LOS firstU --init-from path")
     if args.arch in LUNAR_ARCHITECTURES:
         if args.band == "both":
             raise ValueError(f"{args.arch} uses one band per model; use --band 58 or 415")

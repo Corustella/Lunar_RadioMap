@@ -5,7 +5,8 @@ from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features
 
 
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c")
-ARCHITECTURES = ("radiownet", *LUNAR_ARCHITECTURES)
+RADIO_ARCHITECTURES = ("radiownet", "radiownet_tx_direction")
+ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
 
 
 def uses_los(arch, second_features="none"):
@@ -17,13 +18,15 @@ def output_index(arch, phase):
         if phase != "single":
             raise ValueError(f"{arch} is a single-stage model; use --phase single")
         return 0
-    if arch != "radiownet" or phase not in ("firstU", "secondU"):
+    if arch == "radiownet_tx_direction" and phase != "secondU":
+        raise ValueError("radiownet_tx_direction supports only --phase secondU")
+    if arch not in RADIO_ARCHITECTURES or phase not in ("firstU", "secondU"):
         raise ValueError(f"Unsupported architecture/phase: {arch!r}/{phase!r}")
     return 0 if phase == "firstU" else 1
 
 
 def model_feature_config(meta, arch, second_features="none"):
-    if arch == "radiownet":
+    if arch in RADIO_ARCHITECTURES:
         return feature_config_for_mode(meta, second_features)
     if arch not in LUNAR_ARCHITECTURES:
         raise ValueError(f"Unknown architecture {arch!r}")
@@ -46,15 +49,24 @@ def checkpoint_architecture(checkpoint):
         from lunar_maxvit import lunar_model_config
         if config != lunar_model_config(arch):
             raise ValueError(f"Unsupported or missing {arch} model_config")
+    if arch == "radiownet_tx_direction":
+        from tx_direction import direction_model_config
+        if config != direction_model_config():
+            raise ValueError("Unsupported or missing TX direction model_config")
     return arch
 
 
 def checkpoint_input_config(checkpoint):
     """Return legacy stage flags plus the exact physical input definition."""
     arch = checkpoint_architecture(checkpoint)
-    if arch == "radiownet":
+    if arch in RADIO_ARCHITECTURES:
         mode, config = checkpoint_features(checkpoint)
-        return checkpoint_first_features(checkpoint), mode, config
+        first = checkpoint_first_features(checkpoint)
+        if arch == "radiownet_tx_direction" and (
+                first != "los" or mode != "los_distance" or
+                checkpoint.get("args", {}).get("phase") != "secondU"):
+            raise ValueError("TX direction requires LOS firstU and LOS+distance secondU")
+        return first, mode, config
     saved = checkpoint.get("args", {})
     if (saved.get("first_features", "none") != "none" or
             saved.get("second_features", "none") != "none"):
@@ -70,6 +82,16 @@ def checkpoint_input_config(checkpoint):
 def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
                 first_features="none", second_features="none"):
     output_index(arch, phase)
+    if arch == "radiownet_tx_direction":
+        if inputs != 2 or first_features != "los" or second_features != "los_distance":
+            raise ValueError("TX direction requires a single band, first_features=los, second_features=los_distance")
+        from tx_direction import TXDirectionalRadioWNet, direction_model_config
+        model = RadioWNet(inputs=inputs, phase=phase, first_features=first_features,
+                         second_features=second_features, feature_config=feature_config,
+                         _model_class=TXDirectionalRadioWNet)
+        model.arch = arch
+        model.model_config = direction_model_config()
+        return model
     if arch == "radiownet":
         model = RadioWNet(inputs=inputs, phase=phase,
                          second_features=second_features,
@@ -91,6 +113,26 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
 def load_checkpoint(model, checkpoint, initialize=False):
     source = checkpoint_architecture(checkpoint)
     target = getattr(model, "arch", "radiownet")
+    if target == "radiownet_tx_direction":
+        if source == target:
+            checkpoint_input_config(checkpoint)
+            return load_model_state(model, checkpoint, initialize=initialize)
+        if not initialize or source != "radiownet":
+            raise ValueError("TX direction resume/evaluation requires an exact architecture match")
+        first, mode, _ = checkpoint_input_config(checkpoint)
+        if first != "los" or mode not in ("los", "los_distance"):
+            raise ValueError("Initialize TX direction only from the established LOS RadioWNet weights")
+        state = checkpoint["model"].copy()
+        added = []
+        for name, value in model.state_dict().items():
+            if name.startswith("Wlayer20.0.direction_"):
+                if name in state:
+                    raise ValueError("Legacy checkpoint unexpectedly contains TX direction weights")
+                state[name] = value.detach().clone()
+                added.append(name)
+        result = load_model_state(model, {**checkpoint, "model": state}, initialize=True)
+        result.update(source_arch=source, target_arch=target, added_operator_parameters=added)
+        return result
     if source != target:
         raise ValueError(f"Cannot load {source} weights into {target}; train the new architecture from scratch")
     if target == "radiownet":
