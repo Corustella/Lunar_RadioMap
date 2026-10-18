@@ -4,7 +4,7 @@ from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features
                        feature_config_for_mode, load_model_state)
 
 
-LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade")
+LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c")
 ARCHITECTURES = ("radiownet", *LUNAR_ARCHITECTURES)
 
 

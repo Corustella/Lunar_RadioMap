@@ -9,6 +9,7 @@ full-resolution skips preserve terrain and TX locations on the 256x256 grid.
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torchvision.models.maxvit import MaxVit
 
 from los_features import log_distance_feature
@@ -16,7 +17,7 @@ from los_features import log_distance_feature
 
 def lunar_model_config(arch="lunar_maxvit"):
     """Complete fixed architecture description, also saved in checkpoints."""
-    if arch not in ("lunar_maxvit", "lunar_maxvit_fade"):
+    if arch not in ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c"):
         raise ValueError(f"Unsupported lunar architecture {arch!r}")
     config = {
         "arch": arch, "version": 1,
@@ -86,6 +87,25 @@ def lunar_model_config(arch="lunar_maxvit"):
         }
         config["decoder"]["fusion"] = (
             "first_two_concat_then_double_conv;last_three_FADE_then_double_conv")
+    if arch == "lunar_maxvit_c":
+        config["tx_scene_attention"] = {
+            "encoder_block_index": 1, "resolution": [32, 32], "channels": 128,
+            "anchors": {"operation": "avg_pool2d", "kernel_size": 2,
+                        "stride": 2, "resolution": [16, 16]},
+            "source": {"input": "augmented_TX_one_hot_argmax",
+                       "sampling": "bilinear", "feature_stride": 8,
+                       "feature_origin_px": 0, "align_corners": True,
+                       "padding_mode": "border", "computation_dtype": "float32"},
+            "qkv": "independent_linear_concat_feature_and_TX_feature",
+            "attention_dim": 64, "heads": 4, "linear_bias": True,
+            "scale": "inverse_sqrt_head_dim", "dropout": 0.0,
+            "geometry_bias": False, "attention_mask": None,
+            "implementation": "torch_scaled_dot_product_attention",
+            "computation_dtype": "float32_under_amp_output_cast_to_feature_dtype",
+            "fusion": "residual_before_next_encoder_block_and_skip",
+            "initialization": "torch_default_qkv_zero_output_weight_and_bias",
+            "initialization_rng": "fork_cpu_rng_after_shared_model_initialization",
+        }
     return config
 
 
@@ -132,6 +152,73 @@ class _FADEDecoderBlock(nn.Module):
         coarse = self.coarse_projection(input)
         guide = self.guide_projection(skip)
         return self.fuse(self.up(guide, coarse))
+
+
+class _TXSceneAttention(nn.Module):
+    """C control: source-conditioned content attention, without geometry bias.
+
+    The stride-8 feature lattice is centered at input pixels 0, 8, ..., 248.
+    TX sampling uses those centers and border extension, not endpoint resizing
+    of a 256-pixel map to 32 pixels. Only the already augmented one-hot TX is
+    consulted. Anchors cover the full scene; there is no LOS or validity gate.
+
+    N=1024 queries, M=256 anchors, d=64: attention costs O(B*N*M*d), plus
+    O(B*(N+M)*C*d) projections. A materialized attention matrix is O(B*h*N*M);
+    PyTorch may select a fused kernel. Training also saves network activations.
+    """
+    def __init__(self):
+        super().__init__()
+        self.heads = 4
+        self.attention_dim = 64
+        self.q = nn.Linear(256, self.attention_dim)
+        self.k = nn.Linear(256, self.attention_dim)
+        self.v = nn.Linear(256, self.attention_dim)
+        self.output = nn.Linear(self.attention_dim, 128)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    @staticmethod
+    def source_feature(features, tx):
+        # Coordinate arithmetic and interpolation stay FP32 under AMP. The TX
+        # coordinates are discrete inputs; gradients still reach feature values.
+        with torch.autocast(device_type=features.device.type, enabled=False):
+            index = tx.flatten(1).argmax(1)
+            row = torch.div(index, 256, rounding_mode="floor").float()
+            col = (index % 256).float()
+            grid = torch.stack((2 * col / (8 * 31) - 1,
+                                2 * row / (8 * 31) - 1), dim=-1)
+            grid = grid[:, None, None, :]
+            source = F.grid_sample(features.float(), grid, mode="bilinear",
+                                   padding_mode="border", align_corners=True)
+        return source.flatten(1).to(features.dtype)
+
+    def forward(self, features, tx):
+        if features.ndim != 4 or tuple(features.shape[1:]) != (128, 32, 32):
+            raise ValueError("TX scene attention requires Bx128x32x32 features")
+        if tuple(tx.shape) != (features.shape[0], 1, 256, 256):
+            raise ValueError("TX scene attention requires Bx1x256x256 one-hot TX")
+        # The zero residual starts with tiny task gradients. FP16 Q/K backward
+        # underflows in the local bounded check, even once the output learns.
+        # Keep this new branch FP32 under AMP; the shared model stays unchanged.
+        with torch.autocast(device_type=features.device.type, enabled=False):
+            work = features.float() if features.dtype != torch.float64 else features
+            batch = features.shape[0]
+            source = self.source_feature(work, tx).unsqueeze(1)
+            queries = work.flatten(2).transpose(1, 2)
+            anchors = F.avg_pool2d(work, 2, 2).flatten(2).transpose(1, 2)
+            query_input = torch.cat((queries, source.expand(-1, queries.shape[1], -1)), dim=-1)
+            anchor_input = torch.cat((anchors, source.expand(-1, anchors.shape[1], -1)), dim=-1)
+
+            def split_heads(tensor):
+                return tensor.reshape(batch, -1, self.heads,
+                                      self.attention_dim // self.heads).transpose(1, 2)
+
+            attended = F.scaled_dot_product_attention(
+                split_heads(self.q(query_input)), split_heads(self.k(anchor_input)),
+                split_heads(self.v(anchor_input)), dropout_p=0.0, is_causal=False)
+            attended = attended.transpose(1, 2).reshape(batch, 1024, self.attention_dim)
+            update = self.output(attended).transpose(1, 2).reshape_as(features)
+        return features + update.to(features.dtype)
 
 
 class LunarMaxViT(nn.Module):
@@ -192,6 +279,12 @@ class LunarMaxViT(nn.Module):
         # weights also let gradients reach the encoder on the first update.
         nn.init.normal_(self.output[0].weight, std=0.001)
         nn.init.constant_(self.output[0].bias, 0.5)
+        self.tx_scene_attention = None
+        if arch == "lunar_maxvit_c":
+            # Keep shared seeded weights and subsequent CPU RNG state identical
+            # to B; the new branch has its own deterministic initialization draw.
+            with torch.random.fork_rng(devices=[]):
+                self.tx_scene_attention = _TXSceneAttention()
 
     def forward(self, input):
         if input.ndim != 4 or tuple(input.shape[1:]) != (3, 256, 256):
@@ -202,8 +295,10 @@ class LunarMaxViT(nn.Module):
         physical = torch.cat((input, distance), dim=1)
         features = [self.full_resolution(physical), self.encoder.stem(physical)]
         encoded = features[-1]
-        for block in self.encoder.blocks:
+        for index, block in enumerate(self.encoder.blocks):
             encoded = block(encoded)
+            if index == 1 and self.tx_scene_attention is not None:
+                encoded = self.tx_scene_attention(encoded, input[:, 1:2])
             features.append(encoded)
         # Skips are, in order, block3/block2/block1/stem/full-resolution.
         for decoder, skip in zip(self.decoder, reversed(features[:-1])):

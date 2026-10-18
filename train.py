@@ -4,7 +4,7 @@ Baseline training for the First Lunar Pathloss Radio Map Prediction Challenge.
 Trains RadioWNet to predict a 256x256 pathloss map in dB from a lunar heightmap
 and a one-hot transmitter position.
 
-``--arch lunar_maxvit`` or ``lunar_maxvit_fade`` trains an encoder/decoder jointly,
+``--arch lunar_maxvit`` and its variants train an encoder/decoder jointly,
 with phase ``single`` and input-only LOS/distance features. It reuses the LOS
 cache, masked loss and evaluation path. See LUNAR_MAXVIT.md for server commands.
 
