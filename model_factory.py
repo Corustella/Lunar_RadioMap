@@ -4,7 +4,8 @@ from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features
                        feature_config_for_mode, load_model_state)
 
 
-LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c")
+LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
+                       "lunar_conv_aligned")
 REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
 RADIO_ARCHITECTURES = ("radiownet", *REFINEMENT_ARCHITECTURES)
 ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
@@ -46,7 +47,11 @@ def checkpoint_architecture(checkpoint):
     config = checkpoint.get("model_config")
     if config is not None and config.get("arch") != arch:
         raise ValueError("Checkpoint args and model_config disagree on architecture")
-    if arch in LUNAR_ARCHITECTURES:
+    if arch == "lunar_conv_aligned":
+        from lunar_conv import conv_model_config
+        if config != conv_model_config():
+            raise ValueError("Unsupported or missing lunar_conv_aligned model_config")
+    elif arch in LUNAR_ARCHITECTURES:
         from lunar_maxvit import lunar_model_config
         if config != lunar_model_config(arch):
             raise ValueError(f"Unsupported or missing {arch} model_config")
@@ -123,6 +128,9 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
     if feature_config is None or model_feature_config(
             {**feature_config, "simulation": feature_config}, arch) != feature_config:
         raise ValueError(f"{arch} requires its exact physical input configuration")
+    if arch == "lunar_conv_aligned":
+        from lunar_conv import LunarConvAligned
+        return LunarConvAligned(feature_config)
     from lunar_maxvit import LunarMaxViT
     return LunarMaxViT(feature_config, arch=arch)
 

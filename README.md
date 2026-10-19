@@ -118,7 +118,14 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
-The next LOS+distance experiment uses `train.py --arch radiownet_biscale --phase secondU`
+The current alignment ablation uses `train.py --arch lunar_conv_aligned`:
+a single U-shaped network matched to the MaxViT+AdamW baseline, retaining its
+convolutions and pointwise MLPs while removing window/grid attention and SE.
+It jointly trains on the same H/TX/F/log-distance inputs from scratch, for
+**seed 0 only**. See [LUNAR_CONV_ALIGNED.md](LUNAR_CONV_ALIGNED.md) for the exact
+comparison boundary and server commands. Existing architectures remain available.
+
+The previous LOS+distance experiment uses `train.py --arch radiownet_biscale --phase secondU`
 for two shared 64/128 decoder feedback rounds. It runs **seed 0 only**, with a
 30-epoch review point and the original 150-epoch LR horizon. See
 [BISCALE_RECONSTRUCTION.md](BISCALE_RECONSTRUCTION.md) for the model and commands.
