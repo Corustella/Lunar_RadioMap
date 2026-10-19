@@ -118,6 +118,12 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
+The LOS+distance path-profile experiment is available as
+`train.py --arch radiownet_path_profile --phase secondU`. It adds a shared GRU
+over input-only terrain clearance profiles in one 64x64 refinement block.
+The current experiment runs **seed 0 only**; see [PATH_PROFILE.md](PATH_PROFILE.md)
+for the fixed initialization, cost definition and server commands.
+
 An experimental, jointly trained encoder/decoder is available with
 `train.py --arch lunar_maxvit --los-cache <existing-F-cache>`. It keeps the
 LOS/distance definitions and adds a full-resolution terrain/TX decoding route.

@@ -5,7 +5,7 @@ from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features
 
 
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c")
-RADIO_ARCHITECTURES = ("radiownet", "radiownet_tx_direction")
+RADIO_ARCHITECTURES = ("radiownet", "radiownet_tx_direction", "radiownet_path_profile")
 ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
 
 
@@ -18,8 +18,8 @@ def output_index(arch, phase):
         if phase != "single":
             raise ValueError(f"{arch} is a single-stage model; use --phase single")
         return 0
-    if arch == "radiownet_tx_direction" and phase != "secondU":
-        raise ValueError("radiownet_tx_direction supports only --phase secondU")
+    if arch in ("radiownet_tx_direction", "radiownet_path_profile") and phase != "secondU":
+        raise ValueError(f"{arch} supports only --phase secondU")
     if arch not in RADIO_ARCHITECTURES or phase not in ("firstU", "secondU"):
         raise ValueError(f"Unsupported architecture/phase: {arch!r}/{phase!r}")
     return 0 if phase == "firstU" else 1
@@ -53,6 +53,10 @@ def checkpoint_architecture(checkpoint):
         from tx_direction import direction_model_config
         if config != direction_model_config():
             raise ValueError("Unsupported or missing TX direction model_config")
+    if arch == "radiownet_path_profile":
+        from path_profile import profile_model_config
+        if config != profile_model_config():
+            raise ValueError("Unsupported or missing path profile model_config")
     return arch
 
 
@@ -62,10 +66,10 @@ def checkpoint_input_config(checkpoint):
     if arch in RADIO_ARCHITECTURES:
         mode, config = checkpoint_features(checkpoint)
         first = checkpoint_first_features(checkpoint)
-        if arch == "radiownet_tx_direction" and (
+        if arch in ("radiownet_tx_direction", "radiownet_path_profile") and (
                 first != "los" or mode != "los_distance" or
                 checkpoint.get("args", {}).get("phase") != "secondU"):
-            raise ValueError("TX direction requires LOS firstU and LOS+distance secondU")
+            raise ValueError(f"{arch} requires LOS firstU and LOS+distance secondU")
         return first, mode, config
     saved = checkpoint.get("args", {})
     if (saved.get("first_features", "none") != "none" or
@@ -82,15 +86,20 @@ def checkpoint_input_config(checkpoint):
 def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
                 first_features="none", second_features="none"):
     output_index(arch, phase)
-    if arch == "radiownet_tx_direction":
+    if arch in ("radiownet_tx_direction", "radiownet_path_profile"):
         if inputs != 2 or first_features != "los" or second_features != "los_distance":
-            raise ValueError("TX direction requires a single band, first_features=los, second_features=los_distance")
-        from tx_direction import TXDirectionalRadioWNet, direction_model_config
+            raise ValueError(f"{arch} requires a single band, first_features=los, second_features=los_distance")
+        if arch == "radiownet_tx_direction":
+            from tx_direction import TXDirectionalRadioWNet as model_class
+            from tx_direction import direction_model_config as config_function
+        else:
+            from path_profile import PathProfileRadioWNet as model_class
+            from path_profile import profile_model_config as config_function
         model = RadioWNet(inputs=inputs, phase=phase, first_features=first_features,
                          second_features=second_features, feature_config=feature_config,
-                         _model_class=TXDirectionalRadioWNet)
+                         _model_class=model_class)
         model.arch = arch
-        model.model_config = direction_model_config()
+        model.model_config = config_function()
         return model
     if arch == "radiownet":
         model = RadioWNet(inputs=inputs, phase=phase,
@@ -113,21 +122,26 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
 def load_checkpoint(model, checkpoint, initialize=False):
     source = checkpoint_architecture(checkpoint)
     target = getattr(model, "arch", "radiownet")
-    if target == "radiownet_tx_direction":
+    if target in ("radiownet_tx_direction", "radiownet_path_profile"):
         if source == target:
             checkpoint_input_config(checkpoint)
             return load_model_state(model, checkpoint, initialize=initialize)
         if not initialize or source != "radiownet":
-            raise ValueError("TX direction resume/evaluation requires an exact architecture match")
+            raise ValueError(f"{target} resume/evaluation requires an exact architecture match")
         first, mode, _ = checkpoint_input_config(checkpoint)
         if first != "los" or mode not in ("los", "los_distance"):
-            raise ValueError("Initialize TX direction only from the established LOS RadioWNet weights")
+            raise ValueError(f"Initialize {target} only from the established LOS RadioWNet weights")
+        if target == "radiownet_path_profile" and (
+                mode != "los" or checkpoint.get("args", {}).get("phase") != "firstU"):
+            raise ValueError("Path profile initialization requires the historical LOS firstU checkpoint")
         state = checkpoint["model"].copy()
         added = []
+        prefix = ("Wlayer20.0.direction_" if target == "radiownet_tx_direction"
+                  else "Wlayer10.0.profile_")
         for name, value in model.state_dict().items():
-            if name.startswith("Wlayer20.0.direction_"):
+            if name.startswith(prefix):
                 if name in state:
-                    raise ValueError("Legacy checkpoint unexpectedly contains TX direction weights")
+                    raise ValueError(f"Legacy checkpoint unexpectedly contains {target} weights")
                 state[name] = value.detach().clone()
                 added.append(name)
         result = load_model_state(model, {**checkpoint, "model": state}, initialize=True)
