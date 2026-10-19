@@ -5,7 +5,8 @@ from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features
 
 
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c")
-RADIO_ARCHITECTURES = ("radiownet", "radiownet_tx_direction", "radiownet_path_profile")
+REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
+RADIO_ARCHITECTURES = ("radiownet", *REFINEMENT_ARCHITECTURES)
 ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
 
 
@@ -18,7 +19,7 @@ def output_index(arch, phase):
         if phase != "single":
             raise ValueError(f"{arch} is a single-stage model; use --phase single")
         return 0
-    if arch in ("radiownet_tx_direction", "radiownet_path_profile") and phase != "secondU":
+    if arch in REFINEMENT_ARCHITECTURES and phase != "secondU":
         raise ValueError(f"{arch} supports only --phase secondU")
     if arch not in RADIO_ARCHITECTURES or phase not in ("firstU", "secondU"):
         raise ValueError(f"Unsupported architecture/phase: {arch!r}/{phase!r}")
@@ -57,6 +58,10 @@ def checkpoint_architecture(checkpoint):
         from path_profile import profile_model_config
         if config != profile_model_config():
             raise ValueError("Unsupported or missing path profile model_config")
+    if arch == "radiownet_biscale":
+        from biscale_reconstruction import reconstruction_model_config
+        if config != reconstruction_model_config():
+            raise ValueError("Unsupported or missing BiScale reconstruction model_config")
     return arch
 
 
@@ -66,7 +71,7 @@ def checkpoint_input_config(checkpoint):
     if arch in RADIO_ARCHITECTURES:
         mode, config = checkpoint_features(checkpoint)
         first = checkpoint_first_features(checkpoint)
-        if arch in ("radiownet_tx_direction", "radiownet_path_profile") and (
+        if arch in REFINEMENT_ARCHITECTURES and (
                 first != "los" or mode != "los_distance" or
                 checkpoint.get("args", {}).get("phase") != "secondU"):
             raise ValueError(f"{arch} requires LOS firstU and LOS+distance secondU")
@@ -86,15 +91,18 @@ def checkpoint_input_config(checkpoint):
 def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
                 first_features="none", second_features="none"):
     output_index(arch, phase)
-    if arch in ("radiownet_tx_direction", "radiownet_path_profile"):
+    if arch in REFINEMENT_ARCHITECTURES:
         if inputs != 2 or first_features != "los" or second_features != "los_distance":
             raise ValueError(f"{arch} requires a single band, first_features=los, second_features=los_distance")
         if arch == "radiownet_tx_direction":
             from tx_direction import TXDirectionalRadioWNet as model_class
             from tx_direction import direction_model_config as config_function
-        else:
+        elif arch == "radiownet_path_profile":
             from path_profile import PathProfileRadioWNet as model_class
             from path_profile import profile_model_config as config_function
+        else:
+            from biscale_reconstruction import BiScaleRadioWNet as model_class
+            from biscale_reconstruction import reconstruction_model_config as config_function
         model = RadioWNet(inputs=inputs, phase=phase, first_features=first_features,
                          second_features=second_features, feature_config=feature_config,
                          _model_class=model_class)
@@ -122,7 +130,7 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
 def load_checkpoint(model, checkpoint, initialize=False):
     source = checkpoint_architecture(checkpoint)
     target = getattr(model, "arch", "radiownet")
-    if target in ("radiownet_tx_direction", "radiownet_path_profile"):
+    if target in REFINEMENT_ARCHITECTURES:
         if source == target:
             checkpoint_input_config(checkpoint)
             return load_model_state(model, checkpoint, initialize=initialize)
@@ -131,13 +139,14 @@ def load_checkpoint(model, checkpoint, initialize=False):
         first, mode, _ = checkpoint_input_config(checkpoint)
         if first != "los" or mode not in ("los", "los_distance"):
             raise ValueError(f"Initialize {target} only from the established LOS RadioWNet weights")
-        if target == "radiownet_path_profile" and (
+        if target in ("radiownet_path_profile", "radiownet_biscale") and (
                 mode != "los" or checkpoint.get("args", {}).get("phase") != "firstU"):
-            raise ValueError("Path profile initialization requires the historical LOS firstU checkpoint")
+            raise ValueError(f"{target} initialization requires the historical LOS firstU checkpoint")
         state = checkpoint["model"].copy()
         added = []
-        prefix = ("Wlayer20.0.direction_" if target == "radiownet_tx_direction"
-                  else "Wlayer10.0.profile_")
+        prefix = {"radiownet_tx_direction": "Wlayer20.0.direction_",
+                  "radiownet_path_profile": "Wlayer10.0.profile_",
+                  "radiownet_biscale": "Wreconstruction."}[target]
         for name, value in model.state_dict().items():
             if name.startswith(prefix):
                 if name in state:

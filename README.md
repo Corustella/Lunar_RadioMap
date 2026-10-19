@@ -118,6 +118,11 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
+The next LOS+distance experiment uses `train.py --arch radiownet_biscale --phase secondU`
+for two shared 64/128 decoder feedback rounds. It runs **seed 0 only**, with a
+30-epoch review point and the original 150-epoch LR horizon. See
+[BISCALE_RECONSTRUCTION.md](BISCALE_RECONSTRUCTION.md) for the model and commands.
+
 The LOS+distance path-profile experiment is available as
 `train.py --arch radiownet_path_profile --phase secondU`. It adds a shared GRU
 over input-only terrain clearance profiles in one 64x64 refinement block.

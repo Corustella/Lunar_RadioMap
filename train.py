@@ -84,7 +84,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from metrics import MetricAccumulator, save_example_panels 
 from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
                        feature_config_for_mode)
-from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, build_model,
+from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, REFINEMENT_ARCHITECTURES, build_model,
                            checkpoint_architecture, load_checkpoint,
                            model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
@@ -293,6 +293,8 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
 
 
 def prepare_args(args):
+    if args.stop_after_epochs is not None and not 1 <= args.stop_after_epochs <= args.epochs:
+        raise ValueError("--stop-after-epochs must be between 1 and --epochs (total completed epochs)")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         raise ValueError("--weight-decay must be finite and nonnegative")
     if args.optimizer == "adam" and args.weight_decay != 0:
@@ -300,13 +302,13 @@ def prepare_args(args):
     if args.phase is None:
         args.phase = "single" if args.arch in LUNAR_ARCHITECTURES else "firstU"
     output_index(args.arch, args.phase)
-    if args.arch in ("radiownet_tx_direction", "radiownet_path_profile"):
+    if args.arch in REFINEMENT_ARCHITECTURES:
         if args.band == "both" or args.first_features != "los" or args.second_features != "los_distance":
             raise ValueError(f"{args.arch} requires one band, --first-features los --second-features los_distance")
         if args.init_from in (None, "auto"):
             raise ValueError(f"{args.arch} requires an explicit historical LOS firstU --init-from path")
-        if args.arch == "radiownet_path_profile" and args.init_from in ("none", "scratch", ""):
-            raise ValueError("Path profile training must start from the historical LOS firstU weights")
+        if args.arch in ("radiownet_path_profile", "radiownet_biscale") and args.init_from in ("none", "scratch", ""):
+            raise ValueError(f"{args.arch} training must start from the historical LOS firstU weights")
     if args.arch in LUNAR_ARCHITECTURES:
         if args.band == "both":
             raise ValueError(f"{args.arch} uses one band per model; use --band 58 or 415")
@@ -451,6 +453,13 @@ def main(args):
               "U-Net is untrained, so its output is noise. Pass --init-from "
               "<firstU checkpoint>.")
 
+    end_epoch = args.epochs if args.stop_after_epochs is None else args.stop_after_epochs
+    if start_epoch >= end_epoch:
+        print(f"already completed {start_epoch} epochs; requested stop is {end_epoch}; no training")
+        return
+    if end_epoch < args.epochs:
+        print(f"stopping after {end_epoch} total epochs; LR schedule horizon remains {args.epochs}")
+
     provenance = collect_provenance(args.data_root, ld, checkpoint_sources, args)
     provenance["first_features"] = args.first_features
     provenance["second_features"] = args.second_features
@@ -479,7 +488,7 @@ def main(args):
           f"arch={args.arch} phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
           f"first_features={args.first_features} second_features={args.second_features}")
 
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, end_epoch):
         model.train()
         t0 = time.time()
         running, seen = 0.0, 0
@@ -561,7 +570,7 @@ def main(args):
         if improved:
             torch.save(state, ckpt_best)
             print(f"  new best {best:.4f} dB -> {ckpt_best}")
-        if args.plots_every and (epoch % args.plots_every == 0 or epoch == args.epochs - 1):
+        if args.plots_every and (epoch % args.plots_every == 0 or epoch == end_epoch - 1):
             save_training_curves(hist_path, os.path.join(args.out, f"{args.run_name}_curves.png"))
 
     # Separate best panels from the rolling snapshot; use validation AMP mode.
@@ -582,7 +591,9 @@ def main(args):
                    "first_features": args.first_features,
                    "second_features": args.second_features, "feature_config": feature_config,
                    "selection_metric": "val/rmse_db_masked",
-                   "best": best, "epochs": args.epochs}, f, indent=2)
+                   "best": best, "epochs": args.epochs,
+                   "completed_epochs": end_epoch,
+                   "stop_after_epochs": args.stop_after_epochs}, f, indent=2)
     print(f"done. best {best:.4f} dB (valid pixels only)")
 
 
@@ -608,6 +619,9 @@ def build_parser():
                    help="secondU inputs: none, los [F,0,0], or los_distance [F,rho,0]")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
     p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--stop-after-epochs", type=int, default=None,
+                   help="stop after this many total completed epochs, preserving --epochs as the LR "
+                        "horizon; remove this option to continue with --resume auto")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--optimizer", default="adam", choices=["adam", "adamw"],
