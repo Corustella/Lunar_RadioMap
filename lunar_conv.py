@@ -13,10 +13,12 @@ from torch import nn
 from lunar_maxvit import LunarMaxViT, lunar_model_config
 
 
-def conv_model_config():
+def conv_model_config(arch="lunar_conv_aligned"):
     """Fixed control definition; distinct from every existing checkpoint type."""
+    if arch not in ("lunar_conv_aligned", "lunar_conv_shallow"):
+        raise ValueError(f"Unsupported convolution architecture {arch!r}")
     config = lunar_model_config()
-    config["arch"] = "lunar_conv_aligned"
+    config["arch"] = arch
     encoder = config["encoder"]
     encoder["implementation"] = "lunar_conv.LunarConvAligned"
     for key in ("head_dim", "partition_size", "squeeze_ratio",
@@ -33,6 +35,15 @@ def conv_model_config():
         },
         "initialization": "construct_lunar_maxvit_then_remove_attention_without_new_random_draws",
     })
+    if arch == "lunar_conv_shallow":
+        encoder.update({
+            "block_layers": [1, 1, 1, 1],
+            "depth_ablation": "keep_first_layer_of_each_aligned_stage",
+            "stochastic_depth_prob": 0.18,
+            "stochastic_depth_policy": "preserve_retained_layers_from_aligned_2_2_5_2",
+            "stochastic_depth_by_stage": [[0.0], [0.04], [0.08], [0.18]],
+            "initialization": "construct_lunar_conv_aligned_then_drop_repeated_layers_without_new_random_draws",
+        })
     return config
 
 
@@ -66,7 +77,8 @@ class LunarConvAligned(LunarMaxViT):
     decoder. Parameters/optimizer state are O(sum(L_s*C_s^2)). No attention
     matrix is allocated during forward or backward.
     """
-    def __init__(self, feature_config):
+    def __init__(self, feature_config, arch="lunar_conv_aligned"):
+        config = conv_model_config(arch)
         super().__init__(feature_config, arch="lunar_maxvit")
         for block in self.encoder.blocks:
             for layer in block.layers:
@@ -77,5 +89,12 @@ class LunarConvAligned(LunarMaxViT):
                     ("channel_mlp1", _ResidualChannelMLP(original.window_attention)),
                     ("channel_mlp2", _ResidualChannelMLP(original.grid_attention)),
                 ]))
-        self.arch = "lunar_conv_aligned"
-        self.model_config = conv_model_config()
+        if arch == "lunar_conv_shallow":
+            # Keep the downsampling layer in each stage. This preserves widths,
+            # skips, shared initialization and each retained layer's drop rate.
+            # Rebuilding MaxVit with four layers would resample common weights
+            # and redistribute stochastic depth, introducing extra differences.
+            for block in self.encoder.blocks:
+                block.layers = block.layers[:1]
+        self.arch = arch
+        self.model_config = config

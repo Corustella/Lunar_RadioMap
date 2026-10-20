@@ -118,11 +118,17 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
-The current alignment ablation uses `train.py --arch lunar_conv_aligned`:
+The A/B/C architecture ablation adds `lunar_firstu` (the original first U-Net
+alone, with H/TX/F/log-distance) and `lunar_conv_shallow` (one retained block per
+stage). C remains `lunar_conv_aligned`. All three use the same single-stage
+AdamW recipe; A and B run seeds 0/1, C reuses seed 0 and adds seed 1. See
+[ARCHITECTURE_ABLATION.md](ARCHITECTURE_ABLATION.md) for controls and commands.
+
+The preceding alignment experiment uses `train.py --arch lunar_conv_aligned`:
 a single U-shaped network matched to the MaxViT+AdamW baseline, retaining its
 convolutions and pointwise MLPs while removing window/grid attention and SE.
-It jointly trains on the same H/TX/F/log-distance inputs from scratch, for
-**seed 0 only**. See [LUNAR_CONV_ALIGNED.md](LUNAR_CONV_ALIGNED.md) for the exact
+It jointly trains on the same H/TX/F/log-distance inputs from scratch; its initial
+run used **seed 0 only**. See [LUNAR_CONV_ALIGNED.md](LUNAR_CONV_ALIGNED.md) for the exact
 comparison boundary and server commands. Existing architectures remain available.
 
 The previous LOS+distance experiment uses `train.py --arch radiownet_biscale --phase secondU`

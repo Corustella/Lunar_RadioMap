@@ -600,10 +600,10 @@ def main(args):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        description="Train RadioWNet, lunar MaxViT or its attention-free control.")
+        description="Train RadioWNet or a single-stage lunar architecture.")
     p.add_argument("--data-root", default="LunarRM")
     p.add_argument("--arch", default="radiownet", choices=ARCHITECTURES,
-                   help="lunar_maxvit variants and lunar_conv_aligned jointly train on H, TX, F and rho")
+                   help="lunar_* architectures jointly train on H, TX, F and rho")
     p.add_argument("--band", default="58", choices=["415", "58", "both"],
                    help="'both' trains one conditional model over both "
                         "frequencies and adds a band-flag input channel")
@@ -613,7 +613,7 @@ def build_parser():
                         "fill too and is kept only as an ablation; either way the "
                         "run is selected and ranked on valid pixels.")
     p.add_argument("--phase", default=None, choices=["firstU", "secondU", "single"],
-                   help="default: firstU for RadioWNet, single for lunar_maxvit variants/lunar_conv_aligned")
+                   help="default: firstU for RadioWNet, single for lunar_* architectures")
     p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,
                    help="append cached LOS clearance F to firstU; requires LOS secondU features")
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
