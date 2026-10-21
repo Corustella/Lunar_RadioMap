@@ -118,11 +118,13 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
-The A/B/C architecture ablation adds `lunar_firstu` (the original first U-Net
-alone, with H/TX/F/log-distance) and `lunar_conv_shallow` (one retained block per
-stage). C remains `lunar_conv_aligned`. All three use the same single-stage
-AdamW recipe; A and B run seeds 0/1, C reuses seed 0 and adds seed 1. See
-[ARCHITECTURE_ABLATION.md](ARCHITECTURE_ABLATION.md) for controls and commands.
+The current spatial-aggregation study keeps C (`lunar_conv_aligned`) and adds
+L (`lunar_conv_local3`, dilations 1/1/1) and M (`lunar_conv_multiscale`, 1/2/3).
+Only one depthwise convolution at 32x32 is replaced; both variants keep C's
+initial function and training recipe. Run seeds 0/1 for each, reusing C's results.
+See [LUNAR_CONV_SPATIAL.md](LUNAR_CONV_SPATIAL.md) for controls and commands.
+The completed A/B ablation has been retired from the active code; its historical
+code and checkpoint support remain recoverable at Git commit `9a40414`.
 
 The preceding alignment experiment uses `train.py --arch lunar_conv_aligned`:
 a single U-shaped network matched to the MaxViT+AdamW baseline, retaining its

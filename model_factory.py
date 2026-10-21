@@ -4,8 +4,9 @@ from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features
                        feature_config_for_mode, load_model_state)
 
 
+CONV_ARCHITECTURES = ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_multiscale")
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
-                       "lunar_conv_aligned", "lunar_conv_shallow", "lunar_firstu")
+                       *CONV_ARCHITECTURES)
 REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
 RADIO_ARCHITECTURES = ("radiownet", *REFINEMENT_ARCHITECTURES)
 ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
@@ -47,14 +48,10 @@ def checkpoint_architecture(checkpoint):
     config = checkpoint.get("model_config")
     if config is not None and config.get("arch") != arch:
         raise ValueError("Checkpoint args and model_config disagree on architecture")
-    if arch in ("lunar_conv_aligned", "lunar_conv_shallow"):
+    if arch in CONV_ARCHITECTURES:
         from lunar_conv import conv_model_config
         if config != conv_model_config(arch):
             raise ValueError(f"Unsupported or missing {arch} model_config")
-    elif arch == "lunar_firstu":
-        from lunar_firstu import firstu_model_config
-        if config != firstu_model_config():
-            raise ValueError("Unsupported or missing lunar_firstu model_config")
     elif arch in LUNAR_ARCHITECTURES:
         from lunar_maxvit import lunar_model_config
         if config != lunar_model_config(arch):
@@ -132,12 +129,9 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
     if feature_config is None or model_feature_config(
             {**feature_config, "simulation": feature_config}, arch) != feature_config:
         raise ValueError(f"{arch} requires its exact physical input configuration")
-    if arch in ("lunar_conv_aligned", "lunar_conv_shallow"):
+    if arch in CONV_ARCHITECTURES:
         from lunar_conv import LunarConvAligned
         return LunarConvAligned(feature_config, arch=arch)
-    if arch == "lunar_firstu":
-        from lunar_firstu import LunarFirstU
-        return LunarFirstU(feature_config)
     from lunar_maxvit import LunarMaxViT
     return LunarMaxViT(feature_config, arch=arch)
 

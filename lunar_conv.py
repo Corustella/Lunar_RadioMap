@@ -8,6 +8,7 @@ not a migration of trained RadioWNet or MaxViT weights.
 
 from collections import OrderedDict
 
+import torch
 from torch import nn
 
 from lunar_maxvit import LunarMaxViT, lunar_model_config
@@ -15,7 +16,7 @@ from lunar_maxvit import LunarMaxViT, lunar_model_config
 
 def conv_model_config(arch="lunar_conv_aligned"):
     """Fixed control definition; distinct from every existing checkpoint type."""
-    if arch not in ("lunar_conv_aligned", "lunar_conv_shallow"):
+    if arch not in ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_multiscale"):
         raise ValueError(f"Unsupported convolution architecture {arch!r}")
     config = lunar_model_config()
     config["arch"] = arch
@@ -35,16 +36,58 @@ def conv_model_config(arch="lunar_conv_aligned"):
         },
         "initialization": "construct_lunar_maxvit_then_remove_attention_without_new_random_draws",
     })
-    if arch == "lunar_conv_shallow":
-        encoder.update({
-            "block_layers": [1, 1, 1, 1],
-            "depth_ablation": "keep_first_layer_of_each_aligned_stage",
-            "stochastic_depth_prob": 0.18,
-            "stochastic_depth_policy": "preserve_retained_layers_from_aligned_2_2_5_2",
-            "stochastic_depth_by_stage": [[0.0], [0.04], [0.08], [0.18]],
-            "initialization": "construct_lunar_conv_aligned_then_drop_repeated_layers_without_new_random_draws",
-        })
+    if arch != "lunar_conv_aligned":
+        encoder["spatial_operator"] = {
+            "implementation": "lunar_conv._ParallelDepthwise",
+            "encoder_block_index": 1, "layer_index": 1,
+            "resolution": [32, 32], "expanded_channels": 512,
+            "kernel_size": 3, "stride": 1, "groups": 512, "bias": False,
+            "dilations": [1, 1, 1] if arch == "lunar_conv_local3" else [1, 2, 3],
+            "padding": "zero_equal_to_dilation",
+            "fusion": "sum_then_original_BatchNorm2d_GELU",
+            "branch_normalization": None, "branch_activation": None,
+            "initialization": "retain_base_kernel_zero_two_extra_kernels",
+            "initialization_rng": "fork_cpu_rng_after_shared_model_initialization",
+        }
     return config
+
+
+class _ParallelDepthwise(nn.Module):
+    """Three linear spatial branches, followed by the existing shared BN/GELU.
+
+    Keep the original d=1 kernel; zero extra kernels preserve C's initial
+    function without blocking their gradients. L repeats d=1, M uses d=2/3.
+    Added work is 18*B*H*W*C MACs and 18*C parameters; activation storage stays
+    O(B*H*W*C) with a larger constant. L can fold to 3x3, M to sparse 7x7:
+    equal parameter counts do not imply equal effective kernel capacity.
+    """
+    def __init__(self, original, dilations):
+        super().__init__()
+        if (not isinstance(original, nn.Conv2d) or
+                original.kernel_size != (3, 3) or original.stride != (1, 1) or
+                original.padding != (1, 1) or original.dilation != (1, 1) or
+                original.groups != original.in_channels or
+                original.out_channels != original.in_channels or
+                original.bias is not None or original.padding_mode != "zeros"):
+            raise ValueError("Spatial controls require the original stride-1 depthwise 3x3")
+        self.base = original
+        # The shared model is constructed on CPU before train.py moves it.
+        # Even kernels subsequently zeroed would otherwise consume RNG draws.
+        with torch.random.fork_rng(devices=[]):
+            self.extra = nn.ModuleList([
+                nn.Conv2d(original.in_channels, original.out_channels, 3,
+                          padding=dilation, dilation=dilation,
+                          groups=original.groups, bias=False)
+                for dilation in dilations[1:]
+            ])
+        for branch in self.extra:
+            nn.init.zeros_(branch.weight)
+
+    def forward(self, input):
+        output = self.base(input)
+        for branch in self.extra:
+            output = output + branch(input)
+        return output
 
 
 class _ResidualChannelMLP(nn.Module):
@@ -89,12 +132,9 @@ class LunarConvAligned(LunarMaxViT):
                     ("channel_mlp1", _ResidualChannelMLP(original.window_attention)),
                     ("channel_mlp2", _ResidualChannelMLP(original.grid_attention)),
                 ]))
-        if arch == "lunar_conv_shallow":
-            # Keep the downsampling layer in each stage. This preserves widths,
-            # skips, shared initialization and each retained layer's drop rate.
-            # Rebuilding MaxVit with four layers would resample common weights
-            # and redistribute stochastic depth, introducing extra differences.
-            for block in self.encoder.blocks:
-                block.layers = block.layers[:1]
+        if arch != "lunar_conv_aligned":
+            spatial = self.encoder.blocks[1].layers[1].layers.MBconv.layers.conv_b
+            spatial[0] = _ParallelDepthwise(
+                spatial[0], config["encoder"]["spatial_operator"]["dilations"])
         self.arch = arch
         self.model_config = config
