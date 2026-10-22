@@ -118,7 +118,14 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
-The current spatial-aggregation study keeps C (`lunar_conv_aligned`) and adds
+The current terrain-interaction study keeps C (`lunar_conv_aligned`) and compares
+T (`lunar_conv_tx_content`) with TG (`lunar_conv_tx_geometry`), seeds 0/1 each.
+Both add one source-conditioned interaction at 32x32; TG adds input-only
+TX-ground-RX distance/direction/normal bias. Training and the decoder stay fixed.
+See [LUNAR_TERRAIN_INTERACTION.md](LUNAR_TERRAIN_INTERACTION.md) for the definition,
+physical limits, checkpoint compatibility and server commands.
+
+The preceding spatial-aggregation study keeps C (`lunar_conv_aligned`) and adds
 L (`lunar_conv_local3`, dilations 1/1/1) and M (`lunar_conv_multiscale`, 1/2/3).
 Only one depthwise convolution at 32x32 is replaced; both variants keep C's
 initial function and training recipe. Run seeds 0/1 for each, reusing C's results.

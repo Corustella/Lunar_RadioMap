@@ -11,12 +11,13 @@ from collections import OrderedDict
 import torch
 from torch import nn
 
-from lunar_maxvit import LunarMaxViT, lunar_model_config
+from lunar_maxvit import LunarMaxViT, _TXSceneAttention, lunar_model_config
 
 
 def conv_model_config(arch="lunar_conv_aligned"):
     """Fixed control definition; distinct from every existing checkpoint type."""
-    if arch not in ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_multiscale"):
+    if arch not in ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_multiscale",
+                    "lunar_conv_tx_content", "lunar_conv_tx_geometry"):
         raise ValueError(f"Unsupported convolution architecture {arch!r}")
     config = lunar_model_config()
     config["arch"] = arch
@@ -36,7 +37,7 @@ def conv_model_config(arch="lunar_conv_aligned"):
         },
         "initialization": "construct_lunar_maxvit_then_remove_attention_without_new_random_draws",
     })
-    if arch != "lunar_conv_aligned":
+    if arch in ("lunar_conv_local3", "lunar_conv_multiscale"):
         encoder["spatial_operator"] = {
             "implementation": "lunar_conv._ParallelDepthwise",
             "encoder_block_index": 1, "layer_index": 1,
@@ -49,6 +50,10 @@ def conv_model_config(arch="lunar_conv_aligned"):
             "initialization": "retain_base_kernel_zero_two_extra_kernels",
             "initialization_rng": "fork_cpu_rng_after_shared_model_initialization",
         }
+    if arch in ("lunar_conv_tx_content", "lunar_conv_tx_geometry"):
+        from terrain_interaction import terrain_attention_config
+        config["tx_scene_attention"] = terrain_attention_config(
+            geometry=arch == "lunar_conv_tx_geometry")
     return config
 
 
@@ -117,8 +122,9 @@ class LunarConvAligned(LunarMaxViT):
 
     With expansion/MLP ratios fixed, encoder time is O(B*sum(L_s*N_s*C_s^2));
     retained training activations are O(B*sum(L_s*N_s*C_s)), plus the unchanged
-    decoder. Parameters/optimizer state are O(sum(L_s*C_s^2)). No attention
-    matrix is allocated during forward or backward.
+    decoder. Parameters/optimizer state are O(sum(L_s*C_s^2)). C/L/M allocate
+    no attention matrix. T/TG add one source-conditioned scene interaction;
+    its cost is recorded separately in terrain_interaction.py.
     """
     def __init__(self, feature_config, arch="lunar_conv_aligned"):
         config = conv_model_config(arch)
@@ -132,9 +138,18 @@ class LunarConvAligned(LunarMaxViT):
                     ("channel_mlp1", _ResidualChannelMLP(original.window_attention)),
                     ("channel_mlp2", _ResidualChannelMLP(original.grid_attention)),
                 ]))
-        if arch != "lunar_conv_aligned":
+        if arch in ("lunar_conv_local3", "lunar_conv_multiscale"):
             spatial = self.encoder.blocks[1].layers[1].layers.MBconv.layers.conv_b
             spatial[0] = _ParallelDepthwise(
                 spatial[0], config["encoder"]["spatial_operator"]["dilations"])
+        if arch in ("lunar_conv_tx_content", "lunar_conv_tx_geometry"):
+            # T/TG share C's initialization and subsequent stochastic-depth /
+            # data-loader RNG stream. Their Q/K/V/output initializations match.
+            with torch.random.fork_rng(devices=[]):
+                if arch == "lunar_conv_tx_geometry":
+                    from terrain_interaction import TerrainSceneAttention
+                    self.tx_scene_attention = TerrainSceneAttention(feature_config)
+                else:
+                    self.tx_scene_attention = _TXSceneAttention()
         self.arch = arch
         self.model_config = config

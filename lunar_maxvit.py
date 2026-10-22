@@ -155,7 +155,7 @@ class _FADEDecoderBlock(nn.Module):
 
 
 class _TXSceneAttention(nn.Module):
-    """C control: source-conditioned content attention, without geometry bias.
+    """Source-conditioned content attention; subclasses may add a soft bias.
 
     The stride-8 feature lattice is centered at input pixels 0, 8, ..., 248.
     TX sampling uses those centers and border extension, not endpoint resizing
@@ -192,7 +192,10 @@ class _TXSceneAttention(nn.Module):
                                    padding_mode="border", align_corners=True)
         return source.flatten(1).to(features.dtype)
 
-    def forward(self, features, tx):
+    def attention_bias(self, tx, height):
+        return None
+
+    def forward(self, features, tx, height=None):
         if features.ndim != 4 or tuple(features.shape[1:]) != (128, 32, 32):
             raise ValueError("TX scene attention requires Bx128x32x32 features")
         if tuple(tx.shape) != (features.shape[0], 1, 256, 256):
@@ -215,7 +218,8 @@ class _TXSceneAttention(nn.Module):
 
             attended = F.scaled_dot_product_attention(
                 split_heads(self.q(query_input)), split_heads(self.k(anchor_input)),
-                split_heads(self.v(anchor_input)), dropout_p=0.0, is_causal=False)
+                split_heads(self.v(anchor_input)), attn_mask=self.attention_bias(tx, height),
+                dropout_p=0.0, is_causal=False)
             attended = attended.transpose(1, 2).reshape(batch, 1024, self.attention_dim)
             update = self.output(attended).transpose(1, 2).reshape_as(features)
         return features + update.to(features.dtype)
@@ -298,7 +302,7 @@ class LunarMaxViT(nn.Module):
         for index, block in enumerate(self.encoder.blocks):
             encoded = block(encoded)
             if index == 1 and self.tx_scene_attention is not None:
-                encoded = self.tx_scene_attention(encoded, input[:, 1:2])
+                encoded = self.tx_scene_attention(encoded, input[:, 1:2], input[:, :1])
             features.append(encoded)
         # Skips are, in order, block3/block2/block1/stem/full-resolution.
         for decoder, skip in zip(self.decoder, reversed(features[:-1])):
