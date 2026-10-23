@@ -118,7 +118,15 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
-The current terrain-interaction study keeps C (`lunar_conv_aligned`) and compares
+The current refinement study starts from trained T (`lunar_conv_tx_content`)
+checkpoints and compares continued T with `lunar_conv_tx_refine`, seeds 0/1 each.
+The latter adds a shallow 256/128/64 U with cross-stage decoder features and a
+zero-initialized correction head. Both stages train jointly on the final masked
+MSE. Initial validation is retained in best selection; both groups restart the
+same 150-epoch optimizer/schedule. See [LUNAR_T_REFINEMENT.md](LUNAR_T_REFINEMENT.md)
+for initialization rules, controls and server commands.
+
+The preceding terrain-interaction study keeps C (`lunar_conv_aligned`) and compares
 T (`lunar_conv_tx_content`) with TG (`lunar_conv_tx_geometry`), seeds 0/1 each.
 Both add one source-conditioned interaction at 32x32; TG adds input-only
 TX-ground-RX distance/direction/normal bias. Training and the decoder stay fixed.

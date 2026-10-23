@@ -290,7 +290,13 @@ class LunarMaxViT(nn.Module):
             with torch.random.fork_rng(devices=[]):
                 self.tx_scene_attention = _TXSceneAttention()
 
-    def forward(self, input):
+    def forward_features(self, input):
+        """Return the prediction, physical inputs and decoder states at 64/128/256.
+
+        The prediction path and state-dict keys stay identical for existing
+        models. A refinement model can reuse these states without a second
+        encoder pass or forward hooks.
+        """
         if input.ndim != 4 or tuple(input.shape[1:]) != (3, 256, 256):
             raise ValueError("LunarMaxViT input must be Bx3x256x256 [H, TX, F]")
         if not input.is_floating_point():
@@ -305,7 +311,13 @@ class LunarMaxViT(nn.Module):
                 encoded = self.tx_scene_attention(encoded, input[:, 1:2], input[:, :1])
             features.append(encoded)
         # Skips are, in order, block3/block2/block1/stem/full-resolution.
+        decoded = []
         for decoder, skip in zip(self.decoder, reversed(features[:-1])):
             encoded = decoder(encoded, skip)
+            decoded.append(encoded)
         prediction = self.output(torch.cat((encoded, physical), dim=1))
+        return prediction, physical, decoded[-3:]
+
+    def forward(self, input):
+        prediction, _, _ = self.forward_features(input)
         return [prediction]

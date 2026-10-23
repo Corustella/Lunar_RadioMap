@@ -7,7 +7,7 @@ from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features
 CONV_ARCHITECTURES = ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_multiscale",
                       "lunar_conv_tx_content", "lunar_conv_tx_geometry")
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
-                       *CONV_ARCHITECTURES)
+                       *CONV_ARCHITECTURES, "lunar_conv_tx_refine")
 REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
 RADIO_ARCHITECTURES = ("radiownet", *REFINEMENT_ARCHITECTURES)
 ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
@@ -20,7 +20,7 @@ def uses_los(arch, second_features="none"):
 def output_index(arch, phase):
     if arch in LUNAR_ARCHITECTURES:
         if phase != "single":
-            raise ValueError(f"{arch} is a single-stage model; use --phase single")
+            raise ValueError(f"{arch} is jointly optimized; use --phase single")
         return 0
     if arch in REFINEMENT_ARCHITECTURES and phase != "secondU":
         raise ValueError(f"{arch} supports only --phase secondU")
@@ -49,7 +49,11 @@ def checkpoint_architecture(checkpoint):
     config = checkpoint.get("model_config")
     if config is not None and config.get("arch") != arch:
         raise ValueError("Checkpoint args and model_config disagree on architecture")
-    if arch in CONV_ARCHITECTURES:
+    if arch == "lunar_conv_tx_refine":
+        from lunar_refinement import refinement_model_config
+        if config != refinement_model_config():
+            raise ValueError("Unsupported or missing cross-stage refinement model_config")
+    elif arch in CONV_ARCHITECTURES:
         from lunar_conv import conv_model_config
         if config != conv_model_config(arch):
             raise ValueError(f"Unsupported or missing {arch} model_config")
@@ -130,6 +134,9 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
     if feature_config is None or model_feature_config(
             {**feature_config, "simulation": feature_config}, arch) != feature_config:
         raise ValueError(f"{arch} requires its exact physical input configuration")
+    if arch == "lunar_conv_tx_refine":
+        from lunar_refinement import LunarConvRefine
+        return LunarConvRefine(feature_config)
     if arch in CONV_ARCHITECTURES:
         from lunar_conv import LunarConvAligned
         return LunarConvAligned(feature_config, arch=arch)
@@ -140,6 +147,22 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
 def load_checkpoint(model, checkpoint, initialize=False):
     source = checkpoint_architecture(checkpoint)
     target = getattr(model, "arch", "radiownet")
+    if target == "lunar_conv_tx_refine" and source == "lunar_conv_tx_content" and initialize:
+        _, _, config = checkpoint_input_config(checkpoint)
+        if (config != model.feature_config or
+                checkpoint.get("args", {}).get("phase") != "single"):
+            raise ValueError("T refinement initialization requires matching physical scales and phase single")
+        state = checkpoint["model"].copy()
+        added = []
+        for name, value in model.state_dict().items():
+            if name.startswith("refiner."):
+                if name in state:
+                    raise ValueError("T checkpoint unexpectedly contains refinement weights")
+                state[name] = value.detach().clone()
+                added.append(name)
+        model.load_state_dict(state, strict=True)
+        return {"source_arch": source, "target_arch": target, "strict": True,
+                "added_refinement_parameters": added}
     if target in REFINEMENT_ARCHITECTURES:
         if source == target:
             checkpoint_input_config(checkpoint)

@@ -329,6 +329,10 @@ def prepare_args(args):
         args.init_from = "auto"
     if args.init_from in ("none", "scratch", ""):
         args.init_from = None
+    if args.eval_initial and not (args.init_from or args.resume):
+        raise ValueError("--eval-initial requires --init-from or --resume")
+    if args.arch == "lunar_conv_tx_refine" and not args.eval_initial:
+        raise ValueError("T refinement requires --eval-initial to retain its starting score")
 
 
 def main(args):
@@ -387,6 +391,7 @@ def main(args):
     resumed = False
     checkpoint_sources = {}
     weight_loading = None
+    initial_validation = None
     if args.resume:
         path = ckpt_last if args.resume == "auto" else args.resume
         if os.path.exists(path):
@@ -397,8 +402,12 @@ def main(args):
             if (float(previous.get("grad_weight", 0.0)) != 0.0 or
                     previous.get("loss", args.loss) != args.loss or
                     previous.get("phase", args.phase) != args.phase or
-                    previous.get("band", args.band) != args.band):
-                raise ValueError("Resume requires the same loss, phase and band; use --init-from for a new stage")
+                    previous.get("band", args.band) != args.band or
+                    previous.get("eval_initial", False) != args.eval_initial):
+                raise ValueError("Resume requires the same loss, phase, band and initial-evaluation policy")
+            initial_validation = ck.get("initial_validation")
+            if args.eval_initial and initial_validation is None:
+                raise ValueError("Resume checkpoint lacks its initial-validation record")
             checkpoint_sources["resume"] = path
             check_optimizer_resume(ck, optimizer_config)
             weight_loading = load_checkpoint(model, ck)
@@ -445,7 +454,16 @@ def main(args):
         if prev.get("band", args.band) != args.band:
             raise SystemExit(f"--init-from {path} was trained on band "
                              f"{prev.get('band')}, this run is band {args.band}")
+        if args.arch == "lunar_conv_tx_refine" and (
+                checkpoint_architecture(ck) != "lunar_conv_tx_content" or
+                prev.get("seed") != args.seed):
+            raise ValueError("Initialize refinement from the matching seed's T checkpoint; use --resume for refinement")
         weight_loading = load_checkpoint(model, ck, initialize=True)
+        if args.eval_initial:
+            initial_validation = {"source_checkpoint": path,
+                                  "source_epoch": ck.get("epoch"),
+                                  "source_best": ck.get("best"),
+                                  "source_seed": prev.get("seed")}
         print(f"initialized weights from {path} (phase {prev.get('phase', '?')}, "
               f"epoch {ck.get('epoch')}, best {ck.get('best', float('nan')):.4f} dB); "
               f"optimizer and LR schedule start fresh")
@@ -453,6 +471,8 @@ def main(args):
         print("warning: training secondU from random init -- the frozen first "
               "U-Net is untrained, so its output is noise. Pass --init-from "
               "<firstU checkpoint>.")
+    if not resumed and (args.arch == "lunar_conv_tx_refine" or args.eval_initial) and not args.init_from:
+        raise ValueError("No checkpoint to resume; this experiment requires an explicit --init-from path")
 
     end_epoch = args.epochs if args.stop_after_epochs is None else args.stop_after_epochs
     if start_epoch >= end_epoch:
@@ -460,6 +480,36 @@ def main(args):
         return
     if end_epoch < args.epochs:
         print(f"stopping after {end_epoch} total epochs; LR schedule horizon remains {args.epochs}")
+
+    def make_state(epoch, metrics):
+        return {"model": model.state_dict(), "opt": opt.state_dict(),
+                "scaler": scaler.state_dict(), "sched": sched.state_dict(),
+                "lr_sched": args.lr_sched, "epoch": epoch, "best": best,
+                "args": vars(args), "metrics": metrics, "feature_config": feature_config,
+                "model_config": model.model_config, "optimizer_config": optimizer_config,
+                "initial_validation": initial_validation}
+
+    if args.eval_initial and not resumed:
+        t0 = time.time()
+        # Validation creates DataLoader iterators. Preserve the training RNG
+        # stream, including the CPU generator used for shuffled sample order.
+        rng_devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=rng_devices):
+            metrics = validate(model, val_loader, device, scale, args.amp, out_idx,
+                               limit=args.limit_batches)
+        best = metrics["val/rmse_db_masked"]
+        if not math.isfinite(best):
+            raise ValueError("Initial validation has no finite masked RMSE")
+        initial_validation.update(epoch=-1, metrics=metrics, limit_batches=args.limit_batches,
+                                  seconds=time.time() - t0)
+        with open(os.path.join(args.out, f"{args.run_name}_initial.json"), "w", encoding="utf-8") as handle:
+            json.dump(initial_validation, handle, indent=2)
+        # Epoch -1 is a resumable, untrained starting point, not a new result.
+        # Keeping both files also permits recovery if interrupted before ep0.
+        state = make_state(-1, metrics)
+        torch.save(state, ckpt_best)
+        torch.save(state, ckpt_last)
+        print(f"initial validation: {best:.6f} dB; retained as epoch -1 best", flush=True)
 
     provenance = collect_provenance(args.data_root, ld, checkpoint_sources, args)
     provenance["first_features"] = args.first_features
@@ -471,6 +521,7 @@ def main(args):
         from importlib.metadata import version
         provenance["environment"]["torchvision"] = version("torchvision")
     provenance["weight_loading"] = weight_loading
+    provenance["initial_validation"] = initial_validation
     # On resume retain the original initialization record as well.
     prov_path = os.path.join(args.out, f"{args.run_name}_provenance.json")
     if resumed and os.path.exists(prov_path):
@@ -561,12 +612,7 @@ def main(args):
         improved = sel < best
         if improved:
             best = sel
-        state = {"model": model.state_dict(), "opt": opt.state_dict(),
-                 "scaler": scaler.state_dict(),
-                 "sched": sched.state_dict(), "lr_sched": args.lr_sched,
-                 "epoch": epoch, "best": best, "args": vars(args),
-                 "metrics": metrics, "feature_config": feature_config,
-                 "model_config": model.model_config, "optimizer_config": optimizer_config}
+        state = make_state(epoch, metrics)
         torch.save(state, ckpt_last)
         if improved:
             torch.save(state, ckpt_best)
@@ -592,6 +638,7 @@ def main(args):
                    "first_features": args.first_features,
                    "second_features": args.second_features, "feature_config": feature_config,
                    "selection_metric": "val/rmse_db_masked",
+                   "initial_validation": initial_validation,
                    "best": best, "epochs": args.epochs,
                    "completed_epochs": end_epoch,
                    "stop_after_epochs": args.stop_after_epochs}, f, indent=2)
@@ -652,6 +699,9 @@ def build_parser():
                         "--phase secondU) picks the matching firstU run in --out; "
                         "'none' forces random init. Ignored when --resume finds a "
                         "checkpoint of this run.")
+    p.add_argument("--eval-initial", action="store_true",
+                   help="validate initialized weights before ep0 and retain them in best selection; "
+                        "optimizer/schedule still start fresh; required for T refinement")
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--panels", type=int, default=6,
                    help="validation examples rendered to <run>_panels.png (0 off)")
