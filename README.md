@@ -118,7 +118,15 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
-The current refinement control is `lunar_conv_tx_refine_frozen`, seed0 only.
+The current structural study compares `lunar_conv_tx_refine_unet` (U) with
+`lunar_conv_tx_refine_pyramid` (P), seed0 each. Both keep T fixed and use the
+same full second U down to 8x8. U predicts one correction; P reconstructs a
+32x32 regional correction with zero-mean details at 64/128/256. The original
+inputs, loss and 150-epoch settings are retained. See
+[LUNAR_T_FULL_RECONSTRUCTION.md](LUNAR_T_FULL_RECONSTRUCTION.md) for the math,
+checkpoint rules, and training/evaluation commands.
+
+The preceding refinement control is `lunar_conv_tx_refine_frozen`, seed0 only.
 It keeps the trained T parameters, BatchNorm buffers and stochastic layers fixed
 in evaluation mode, and optimizes only the unchanged shallow refiner. Inputs,
 masked MSE and the refiner's 150-epoch schedule stay unchanged. See

@@ -117,7 +117,7 @@ def build_optimizer(model, name, lr, weight_decay):
     Construction is O(P); Adam and AdamW both retain O(P) optimizer state.
     """
     named = dict(model.named_parameters())
-    if getattr(model, "arch", None) == "lunar_conv_tx_refine_frozen":
+    if getattr(model, "frozen_stage_one", False):
         named = {name: parameter for name, parameter in named.items() if parameter.requires_grad}
     if name == "adam":
         if weight_decay != 0:
@@ -135,7 +135,7 @@ def build_optimizer(model, name, lr, weight_decay):
             {"params": [named[n] for n in groups[1]], "weight_decay": 0.0},
         ], lr=lr)
         policy = "conv_linear_weights_only_v1"
-    if getattr(model, "arch", None) == "lunar_conv_tx_refine_frozen":
+    if getattr(model, "frozen_stage_one", False):
         policy += "_trainable_only"
     config = {"name": name, "weight_decay": weight_decay, "policy": policy,
               "betas": [0.9, 0.999], "eps": 1e-8,
@@ -656,7 +656,7 @@ def build_parser():
         description="Train RadioWNet or a single-output lunar architecture.")
     p.add_argument("--data-root", default="LunarRM")
     p.add_argument("--arch", default="radiownet", choices=ARCHITECTURES,
-                   help="lunar_* architectures use H, TX, F and rho; refine_frozen trains only the refiner")
+                   help="lunar_* use H, TX, F and rho; fixed-T refinement trains only the refiner")
     p.add_argument("--band", default="58", choices=["415", "58", "both"],
                    help="'both' trains one conditional model over both "
                         "frequencies and adds a band-flag input channel")

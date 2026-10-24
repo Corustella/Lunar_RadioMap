@@ -6,7 +6,8 @@ from radiounet import (RadioWNet, checkpoint_features, checkpoint_first_features
 
 CONV_ARCHITECTURES = ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_multiscale",
                       "lunar_conv_tx_content", "lunar_conv_tx_geometry")
-T_REFINEMENT_ARCHITECTURES = ("lunar_conv_tx_refine", "lunar_conv_tx_refine_frozen")
+T_REFINEMENT_ARCHITECTURES = ("lunar_conv_tx_refine", "lunar_conv_tx_refine_frozen",
+                             "lunar_conv_tx_refine_unet", "lunar_conv_tx_refine_pyramid")
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
                        *CONV_ARCHITECTURES, *T_REFINEMENT_ARCHITECTURES)
 REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
