@@ -86,7 +86,7 @@ from metrics import MetricAccumulator, save_example_panels
 from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
                        feature_config_for_mode)
 from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, REFINEMENT_ARCHITECTURES, build_model,
-                           checkpoint_architecture, load_checkpoint,
+                           T_REFINEMENT_ARCHITECTURES, checkpoint_architecture, load_checkpoint,
                            model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
 from analysis_plots import save_training_curves
@@ -117,11 +117,13 @@ def build_optimizer(model, name, lr, weight_decay):
     Construction is O(P); Adam and AdamW both retain O(P) optimizer state.
     """
     named = dict(model.named_parameters())
+    if getattr(model, "arch", None) == "lunar_conv_tx_refine_frozen":
+        named = {name: parameter for name, parameter in named.items() if parameter.requires_grad}
     if name == "adam":
         if weight_decay != 0:
             raise ValueError("Use --optimizer adamw for decoupled --weight-decay")
         groups = [list(named)]
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        opt = torch.optim.Adam(list(named.values()), lr=lr)
         policy = "legacy_all_parameters"
     else:
         decay_ids = {id(module.weight) for module in model.modules()
@@ -133,6 +135,8 @@ def build_optimizer(model, name, lr, weight_decay):
             {"params": [named[n] for n in groups[1]], "weight_decay": 0.0},
         ], lr=lr)
         policy = "conv_linear_weights_only_v1"
+    if getattr(model, "arch", None) == "lunar_conv_tx_refine_frozen":
+        policy += "_trainable_only"
     config = {"name": name, "weight_decay": weight_decay, "policy": policy,
               "betas": [0.9, 0.999], "eps": 1e-8,
               "groups": [{"parameter_names": names,
@@ -331,7 +335,7 @@ def prepare_args(args):
         args.init_from = None
     if args.eval_initial and not (args.init_from or args.resume):
         raise ValueError("--eval-initial requires --init-from or --resume")
-    if args.arch == "lunar_conv_tx_refine" and not args.eval_initial:
+    if args.arch in T_REFINEMENT_ARCHITECTURES and not args.eval_initial:
         raise ValueError("T refinement requires --eval-initial to retain its starting score")
 
 
@@ -361,8 +365,10 @@ def main(args):
                         second_features=args.second_features, feature_config=feature_config,
                         first_features=args.first_features).to(device)
     
-    for pname, prm in model.named_parameters():
-        prm.requires_grad_(args.arch in LUNAR_ARCHITECTURES or trains_in_phase(pname, args.phase))
+    # Lunar constructors own their trainability policy, including fixed T.
+    if args.arch not in LUNAR_ARCHITECTURES:
+        for pname, prm in model.named_parameters():
+            prm.requires_grad_(trains_in_phase(pname, args.phase))
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in model.parameters())
     print(f"trainable params {n_train:,} / {n_total:,} ({args.arch}, {args.phase})")
@@ -454,7 +460,7 @@ def main(args):
         if prev.get("band", args.band) != args.band:
             raise SystemExit(f"--init-from {path} was trained on band "
                              f"{prev.get('band')}, this run is band {args.band}")
-        if args.arch == "lunar_conv_tx_refine" and (
+        if args.arch in T_REFINEMENT_ARCHITECTURES and (
                 checkpoint_architecture(ck) != "lunar_conv_tx_content" or
                 prev.get("seed") != args.seed):
             raise ValueError("Initialize refinement from the matching seed's T checkpoint; use --resume for refinement")
@@ -471,7 +477,7 @@ def main(args):
         print("warning: training secondU from random init -- the frozen first "
               "U-Net is untrained, so its output is noise. Pass --init-from "
               "<firstU checkpoint>.")
-    if not resumed and (args.arch == "lunar_conv_tx_refine" or args.eval_initial) and not args.init_from:
+    if not resumed and (args.arch in T_REFINEMENT_ARCHITECTURES or args.eval_initial) and not args.init_from:
         raise ValueError("No checkpoint to resume; this experiment requires an explicit --init-from path")
 
     end_epoch = args.epochs if args.stop_after_epochs is None else args.stop_after_epochs
@@ -647,10 +653,10 @@ def main(args):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        description="Train RadioWNet or a single-stage lunar architecture.")
+        description="Train RadioWNet or a single-output lunar architecture.")
     p.add_argument("--data-root", default="LunarRM")
     p.add_argument("--arch", default="radiownet", choices=ARCHITECTURES,
-                   help="lunar_* architectures jointly train on H, TX, F and rho")
+                   help="lunar_* architectures use H, TX, F and rho; refine_frozen trains only the refiner")
     p.add_argument("--band", default="58", choices=["415", "58", "both"],
                    help="'both' trains one conditional model over both "
                         "frequencies and adds a band-flag input channel")

@@ -1,9 +1,9 @@
-"""Joint T + shallow cross-stage refinement for full-map pathloss prediction.
+"""T + shallow cross-stage refinement for full-map pathloss prediction.
 
 The information-flow hypothesis is inspired by RadioUNet retrospective
 refinement and MPRNet cross-stage feature fusion, not a reproduction of either
 network. No extra loss, attention, geometry feature or validity-mask input is
-introduced. Stage one is the existing T; both stages remain trainable.
+introduced. Stage one is the existing T, jointly trained or kept fixed in eval.
 """
 
 import torch
@@ -14,9 +14,11 @@ from lunar_conv import LunarConvAligned, conv_model_config
 from lunar_maxvit import _DecoderBlock, _double_conv
 
 
-def refinement_model_config():
+def refinement_model_config(arch="lunar_conv_tx_refine"):
+    if arch not in ("lunar_conv_tx_refine", "lunar_conv_tx_refine_frozen"):
+        raise ValueError(f"Unsupported refinement architecture {arch!r}")
     config = conv_model_config("lunar_conv_tx_content")
-    config["arch"] = "lunar_conv_tx_refine"
+    config["arch"] = arch
     config["refinement"] = {
         "implementation": "lunar_refinement._CrossStageRefiner",
         "base_arch": "lunar_conv_tx_content",
@@ -51,6 +53,14 @@ def refinement_model_config():
         "initialization_source": "matching_seed_T_checkpoint_weights_only",
         "supervision": "final_prediction_only",
     })
+    if arch == "lunar_conv_tx_refine_frozen":
+        config["refinement"]["cross_stage"]["detach"] = True
+        config["training"].update({
+            "frozen_parameters": True,
+            "trainable_parameters": "refiner.*",
+            "stage_one_mode": "eval_including_batchnorm_and_stochastic_depth",
+            "stage_one_forward": "no_grad",
+        })
     return config
 
 
@@ -90,21 +100,41 @@ class _CrossStageRefiner(nn.Module):
 
 
 class LunarConvRefine(LunarConvAligned):
-    """Two structural stages, one joint optimization phase and final output.
+    """Two structural stages and one final output, with optional fixed T.
 
     Shared T weights retain their names for strict, explicit initialization.
     Only refiner.* is new. The refiner reads test-available inputs/features;
     ground truth and the simulation validity mask are never model inputs.
     """
-    def __init__(self, feature_config):
+    def __init__(self, feature_config, arch="lunar_conv_tx_refine"):
+        config = refinement_model_config(arch)
         super().__init__(feature_config, arch="lunar_conv_tx_content")
         with torch.random.fork_rng(devices=[]):
             self.refiner = _CrossStageRefiner()
-        self.arch = "lunar_conv_tx_refine"
-        self.model_config = refinement_model_config()
+        self.arch = arch
+        self.model_config = config
+        self.frozen_stage_one = arch == "lunar_conv_tx_refine_frozen"
+        if self.frozen_stage_one:
+            for name, parameter in self.named_parameters():
+                parameter.requires_grad_(name.startswith("refiner."))
+            self.train(self.training)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.frozen_stage_one:
+            # Keep T's buffers and stochastic layers fixed even when the outer
+            # training loop switches the entire model back to training mode.
+            for name, module in self.named_children():
+                if name != "refiner":
+                    module.eval()
+        return self
 
     def forward(self, input):
-        prediction, physical, decoded = self.forward_features(input)
+        if self.frozen_stage_one:
+            with torch.no_grad():
+                prediction, physical, decoded = self.forward_features(input)
+        else:
+            prediction, physical, decoded = self.forward_features(input)
         correction = self.refiner(physical, prediction, decoded)
         # Keep small signed corrections when the convolution path uses AMP.
         # ReLU preserves the existing normalized, nonnegative output contract.

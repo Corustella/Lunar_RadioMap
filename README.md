@@ -118,7 +118,14 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
-The current refinement study starts from trained T (`lunar_conv_tx_content`)
+The current refinement control is `lunar_conv_tx_refine_frozen`, seed0 only.
+It keeps the trained T parameters, BatchNorm buffers and stochastic layers fixed
+in evaluation mode, and optimizes only the unchanged shallow refiner. Inputs,
+masked MSE and the refiner's 150-epoch schedule stay unchanged. See
+[LUNAR_T_REFINEMENT_FROZEN.md](LUNAR_T_REFINEMENT_FROZEN.md) for the single-seed
+initialization, resume and server commands.
+
+The preceding joint refinement study starts from trained T (`lunar_conv_tx_content`)
 checkpoints and compares continued T with `lunar_conv_tx_refine`, seeds 0/1 each.
 The latter adds a shallow 256/128/64 U with cross-stage decoder features and a
 zero-initialized correction head. Both stages train jointly on the final masked
