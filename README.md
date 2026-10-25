@@ -64,6 +64,7 @@ python evaluate.py --ckpt runs/<run>_best.pt --data-root <data> --split val
 | `metrics.py`                    | RMSE / NMSE / PSNR / SSIM, with masked variants                           |
 | `radiounet.py`                  | seam onto the vendored upstream model                                     |
 | `lunar_maxvit.py`              | independent lunar-input MaxViT encoder and convolution decoder              |
+| `lunar_nested.py`              | full/local UNet++-inspired nested skips inside the T baseline                |
 | `model_factory.py`             | architecture selection and strict, backward-compatible checkpoint loading  |
 | `benchmark_inference.py`       | batch-one timing including live physical feature construction               |
 | `los_features.py`              | input-only terrain clearance, log-distance and cached features              |
@@ -118,7 +119,14 @@ samples sharing one heightmap, so a per-sample split would leak.
 
 ## Baseline
 
-The current structural study compares `lunar_conv_tx_refine_unet` (U) with
+The current structural study uses T as its baseline and compares full nested
+skips (`lunar_conv_tx_nested_full`, main candidate) with local 64/128/256 nested
+skips (`lunar_conv_tx_nested_local`, scope ablation), **seed0 each**. Both train
+from scratch end to end with T's inputs, output, masked loss and 150-epoch recipe.
+See [LUNAR_T_NESTED_SKIPS.md](LUNAR_T_NESTED_SKIPS.md) for the topology,
+initialization, checkpoint rules and server commands.
+
+The preceding structural study compares `lunar_conv_tx_refine_unet` (U) with
 `lunar_conv_tx_refine_pyramid` (P), seed0 each. Both keep T fixed and use the
 same full second U down to 8x8. U predicts one correction; P reconstructs a
 32x32 regional correction with zero-mean details at 64/128/256. The original
