@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from los_features import clearance_feature
-from model_factory import (ARCHITECTURES, RADIO_ARCHITECTURES, build_model, checkpoint_architecture,
+from model_factory import (ARCHITECTURES, RADIO_ARCHITECTURES, MECHANISM_ARCHITECTURES, build_model, checkpoint_architecture,
                            checkpoint_input_config, load_checkpoint,
                            model_feature_config, output_index)
 from radiounet import feature_config_for_mode
@@ -66,7 +66,7 @@ def timing_statistics(values):
 
 @torch.inference_mode()
 def measure_row(dataset, index, model, config, los_config, device, amp, chunk,
-                out_idx):
+                out_idx, geometry_threads=8):
     # Use input readers directly: dataset[index] would also read hidden labels
     # on train/val, and cached feature wrappers would omit the actual F cost.
     read_start = time.perf_counter()
@@ -92,7 +92,14 @@ def measure_row(dataset, index, model, config, los_config, device, amp, chunk,
     feature = clearance_feature(height_m, tx, los_config, device, chunk)
     if feature.shape != height.shape or not np.isfinite(feature).all():
         raise ValueError(f"Invalid freshly constructed clearance at row {index}")
-    x = torch.from_numpy(np.stack((height, tx_map, feature))).unsqueeze(0)
+    channels = np.stack((height,tx_map,feature))
+    mechanism_stats = None
+    if model.arch in MECHANISM_ARCHITECTURES:
+        from mechanism_features import construct_features
+        extra,mechanism_stats = construct_features(height_m,tx,config,device,
+            mode=config["mechanism_mode"],threads=geometry_threads)
+        channels = np.concatenate((channels,extra),axis=0)
+    x = torch.from_numpy(channels).unsqueeze(0)
     x = x.to(device)
     synchronize(device)
     feature_end = time.perf_counter()
@@ -122,15 +129,16 @@ def measure_row(dataset, index, model, config, los_config, device, amp, chunk,
             "output_ms": (total_end - network_end) * 1000,
             "total_ms": total_ms,
             "input_read_plus_total_ms": input_read_ms + total_ms,
-            "within_500ms": total_ms <= 500.0}
+            "within_500ms": total_ms <= 500.0,
+            "mechanism_construction": mechanism_stats}
 
 
 def main(args):
     output_path = Path(args.out).resolve()
     if output_path.exists():
         raise FileExistsError(f"Refusing to overwrite {output_path}; choose a new --out")
-    if args.chunk < 1:
-        raise ValueError("--chunk must be positive")
+    if args.chunk < 1 or args.geometry_threads < 1:
+        raise ValueError("--chunk and --geometry-threads must be positive")
     if args.samples < 1 or args.warmup < 0:
         raise ValueError("--samples must be positive and --warmup nonnegative")
     device = torch.device(args.device)
@@ -174,6 +182,8 @@ def main(args):
             first_features != "los" or second_features != "los_distance"):
         raise ValueError("RadioWNet timing requires the complete LOS+distance secondU model")
     out_idx = output_index(arch, phase)
+    if arch in MECHANISM_ARCHITECTURES and band != "58":
+        raise ValueError("D/S timing requires band 58")
 
     ld = load_dataset_module(args.data_root)
     dataset = ld.LunarRadioMapDataset(args.data_root, split=args.split, band=band,
@@ -194,17 +204,18 @@ def main(args):
     print(f"batch=1, {arch}, {'checkpoint weights' if checkpoint is not None else 'RANDOM weights'}, "
           f"band={band}, device={device}, amp={amp}, params={parameter_count:,}", flush=True)
     print(f"loader: {Path(ld.__file__).resolve()}", flush=True)
-    print("Total includes live F, input transfers, model/rho and CPU dB output; "
+    print("Total includes live physical features, input transfers, model/rho and CPU dB output; "
           "disk input reads are reported separately. No labels/masks/F cache.", flush=True)
+    warmup_records = []
     for index in warming:
-        measure_row(dataset, index, model, config, los_config, device, amp,
-                    args.chunk, out_idx)
+        warmup_records.append(measure_row(dataset,index,model,config,los_config,device,amp,
+                                         args.chunk,out_idx,args.geometry_threads))
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     rows = []
     for index in measured:
         row = measure_row(dataset, index, model, config, los_config, device, amp,
-                          args.chunk, out_idx)
+                          args.chunk, out_idx,args.geometry_threads)
         rows.append(row)
         print(f"  {len(rows)}/{len(measured)} row={index}: "
               f"feature={row['feature_ms']:.2f}, network={row['network_ms']:.2f}, "
@@ -229,6 +240,13 @@ def main(args):
                    "cudnn_deterministic": torch.backends.cudnn.deterministic,
                    "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
                    "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32}
+    if arch in MECHANISM_ARCHITECTURES and config["mechanism_mode"] != "a":
+        environment["numba"] = version("numba")
+        if device.type == "cuda":
+            environment["cuda_python"] = version("cuda-python")
+        summary["memory_scope_note"] = (
+            "Peak CUDA statistics below cover only the PyTorch allocator. Numba reflection "
+            "live-array bytes are recorded per sample; total process peak VRAM is not measured.")
     if device.type == "cuda":
         environment["gpu"] = torch.cuda.get_device_name(device)
         environment["gpu_total_memory_bytes"] = torch.cuda.get_device_properties(device).total_memory
@@ -243,20 +261,26 @@ def main(args):
               "model_config": model.model_config, "feature_config": config,
               "parameter_count": parameter_count, "batch_size": 1,
               "amp": amp, "seed": args.seed, "clearance_chunk": args.chunk,
+              "geometry_threads": args.geometry_threads,
               "data_root": str(Path(args.data_root).resolve()), "split": args.split,
               "actual_loader": str(Path(ld.__file__).resolve()),
               "metadata_path": str(Path(args.data_root).resolve() / "metadata.json"),
               "metadata": dataset.meta, "environment": environment,
               "warmup_rows": warming, "measured_rows": measured,
+              "warmup_records": warmup_records,
               "timing_scope": {
                   "input_read_ms": "Actual loader _heightmap and _tx calls; OS/mmap caches are uncontrolled",
-                  "feature_ms": "Input validation/normalization, live FP32 clearance, CPU stacking and input H2D",
+                  "feature_ms": "Validation/normalization, live F and enabled D/S (fresh mesh/tree), stacking and transfers",
                   "network_ms": "Synchronized entire model forward including rho; autocast context overhead included",
                   "output_ms": "Prediction transfer to CPU, dB conversion and finite/shape checks",
                   "total_ms": "feature_ms + network_ms + output_ms; excludes disk reads and model startup",
                   "input_read_plus_total_ms": "Input readers plus the complete measured inference path",
-                  "excluded": "Model/checkpoint loading, metadata/index parsing, warmup and report serialization"},
+                  "excluded": "Model/checkpoint loading, metadata/index parsing, warmup (including JIT) and report serialization"},
               "summary": summary, "per_sample": rows}
+    if arch in MECHANISM_ARCHITECTURES:
+        from experiment_provenance import collect_provenance
+        report["provenance"] = collect_provenance(
+            args.data_root,ld,{"weights":args.ckpt} if args.ckpt else {},args)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2, allow_nan=False)
@@ -283,6 +307,7 @@ def build_parser():
     parser.add_argument("--warmup", type=int, default=3,
                         help="additional distinct samples, excluded from timing summary")
     parser.add_argument("--chunk", type=int, default=4096)
+    parser.add_argument("--geometry-threads", type=int, default=8)
     parser.add_argument("--amp", action="store_true", default=True)
     parser.add_argument("--no-amp", dest="amp", action="store_false")
     parser.add_argument("--seed", type=int, default=0)

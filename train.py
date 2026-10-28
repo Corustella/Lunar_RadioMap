@@ -85,7 +85,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from metrics import MetricAccumulator, save_example_panels 
 from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
                        feature_config_for_mode)
-from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, REFINEMENT_ARCHITECTURES, build_model,
+from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, MECHANISM_ARCHITECTURES, REFINEMENT_ARCHITECTURES, build_model,
                            T_REFINEMENT_ARCHITECTURES, checkpoint_architecture, load_checkpoint,
                            model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
@@ -228,9 +228,13 @@ def make_loaders(ld, args):
         if not args.los_cache:
             raise ValueError("LOS inputs require --los-cache")
         config = feature_config_for_mode(train_ds.meta, "los")
+        mechanism = {}
+        if args.arch in MECHANISM_ARCHITECTURES:
+            mechanism = {"mechanism_cache": args.mechanism_cache,
+                         "mechanism_mode": args.arch.rsplit("_",1)[-1]}
         train_ds = LOSDataset(train_ds, args.los_cache, config,
-                              augment=not args.no_augment, augmentation=ld._augment)
-        val_ds = LOSDataset(val_ds, args.los_cache, config)
+                              augment=not args.no_augment, augmentation=ld._augment, **mechanism)
+        val_ds = LOSDataset(val_ds, args.los_cache, config, **mechanism)
     print(f"samples: {len(train_ds)} train / {len(val_ds)} val")
 
     dl = dict(batch_size=args.batch_size, num_workers=args.num_workers,
@@ -315,6 +319,8 @@ def prepare_args(args):
         if args.arch in ("radiownet_path_profile", "radiownet_biscale") and args.init_from in ("none", "scratch", ""):
             raise ValueError(f"{args.arch} training must start from the historical LOS firstU weights")
     if args.arch in LUNAR_ARCHITECTURES:
+        if args.arch in MECHANISM_ARCHITECTURES and args.band != "58":
+            raise ValueError("D/S ablations require --band 58")
         if args.band == "both":
             raise ValueError(f"{args.arch} uses one band per model; use --band 58 or 415")
         if args.first_features != "none" or args.second_features != "none":
@@ -672,6 +678,8 @@ def build_parser():
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
                    help="secondU inputs: none, los [F,0,0], or los_distance [F,rho,0]")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
+    p.add_argument("--mechanism-cache", default=None,
+                   help="separate four-channel cache from build_los_cache.py --feature-set mechanisms")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--stop-after-epochs", type=int, default=None,
                    help="stop after this many total completed epochs, preserving --epochs as the LR "

@@ -9,8 +9,10 @@ CONV_ARCHITECTURES = ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_mul
 T_REFINEMENT_ARCHITECTURES = ("lunar_conv_tx_refine", "lunar_conv_tx_refine_frozen",
                              "lunar_conv_tx_refine_unet", "lunar_conv_tx_refine_pyramid")
 NESTED_ARCHITECTURES = ("lunar_conv_tx_nested_full", "lunar_conv_tx_nested_local")
+MECHANISM_ARCHITECTURES = tuple(f"lunar_conv_tx_mechanism_{mode}" for mode in ("a","d","s","ds"))
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
-                       *CONV_ARCHITECTURES, *T_REFINEMENT_ARCHITECTURES, *NESTED_ARCHITECTURES)
+                       *CONV_ARCHITECTURES, *T_REFINEMENT_ARCHITECTURES, *NESTED_ARCHITECTURES,
+                       *MECHANISM_ARCHITECTURES)
 REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
 RADIO_ARCHITECTURES = ("radiownet", *REFINEMENT_ARCHITECTURES)
 ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
@@ -41,6 +43,11 @@ def model_feature_config(meta, arch, second_features="none"):
     config = feature_config_for_mode(meta, "los")
     config["distance"] = log_distance_config(config)
     config["input_channels"] = ["H", "TX", "F", "rho"]
+    if arch in MECHANISM_ARCHITECTURES:
+        from mechanism_features import CHANNELS, mechanism_config
+        config["input_channels"] += CHANNELS
+        config["mechanisms"] = mechanism_config(meta)
+        config["mechanism_mode"] = arch.rsplit("_",1)[-1]
     return config
 
 
@@ -52,7 +59,13 @@ def checkpoint_architecture(checkpoint):
     config = checkpoint.get("model_config")
     if config is not None and config.get("arch") != arch:
         raise ValueError("Checkpoint args and model_config disagree on architecture")
-    if arch in NESTED_ARCHITECTURES:
+    if arch in MECHANISM_ARCHITECTURES:
+        from lunar_mechanisms import mechanism_model_config
+        if config != mechanism_model_config(arch):
+            raise ValueError(f"Unsupported or missing {arch} model_config")
+        if checkpoint.get("args",{}).get("band") != "58":
+            raise ValueError("D/S checkpoints require band 58")
+    elif arch in NESTED_ARCHITECTURES:
         from lunar_nested import nested_model_config
         if config != nested_model_config(arch):
             raise ValueError(f"Unsupported or missing {arch} model_config")
@@ -141,6 +154,9 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
     if feature_config is None or model_feature_config(
             {**feature_config, "simulation": feature_config}, arch) != feature_config:
         raise ValueError(f"{arch} requires its exact physical input configuration")
+    if arch in MECHANISM_ARCHITECTURES:
+        from lunar_mechanisms import LunarConvMechanisms
+        return LunarConvMechanisms(feature_config,arch=arch)
     if arch in NESTED_ARCHITECTURES:
         from lunar_nested import LunarConvNested
         return LunarConvNested(feature_config, arch=arch)

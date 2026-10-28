@@ -67,6 +67,8 @@ python evaluate.py --ckpt runs/<run>_best.pt --data-root <data> --split val
 | `lunar_nested.py`              | full/local UNet++-inspired nested skips inside the T baseline                |
 | `model_factory.py`             | architecture selection and strict, backward-compatible checkpoint loading  |
 | `benchmark_inference.py`       | batch-one timing including live physical feature construction               |
+| `mechanism_features.py` / `mechanism_geometry*.py` | optional direct-area and single-bounce specular input features |
+| `lunar_mechanisms.py`          | capacity-matched A/D/S/DS input controls on T; [usage and validation gates](MECHANISM_FEATURES.md) |
 | `los_features.py`              | input-only terrain clearance, log-distance and cached features              |
 | `build_los_cache.py`           | builds or reuses train/val/test LOS caches                                  |
 | `run_los.py`                   | runs two seeds, each with firstU then secondU LOS training                   |

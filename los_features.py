@@ -128,7 +128,8 @@ class LOSDataset(Dataset):
     Reads take O(HW) time/memory per sample; the whole cache stays memory-mapped.
     """
 
-    def __init__(self, base, cache_root, config, augment=False, augmentation=None):
+    def __init__(self, base, cache_root, config, augment=False, augmentation=None,
+                 mechanism_cache=None, mechanism_mode=None):
         if base.augment or not base.normalize:
             raise ValueError("LOS adapter needs an unaugmented, normalized base dataset")
         if augment and augmentation is None:
@@ -138,10 +139,23 @@ class LOSDataset(Dataset):
         self.pl_min, self.pl_max, self.split = base.pl_min, base.pl_max, base.split
         self.path = read_cache(cache_root, base, config)
         self._features = None
+        self.mechanism_mode, self.mechanism_path = mechanism_mode, None
+        self._mechanisms = None
+        if mechanism_mode is not None:
+            from mechanism_features import channel_mask, mechanism_cache_config, read_mechanism_cache
+            self.mechanism_mask = torch.tensor(channel_mask(mechanism_mode))[:,None,None]
+            if any(band != "58" for _, band in self.samples):
+                raise ValueError("D/S features require --band 58")
+            if mechanism_mode != "a":
+                if not mechanism_cache:
+                    raise ValueError("D/S inputs require --mechanism-cache")
+                self.mechanism_path = read_mechanism_cache(
+                    mechanism_cache,base,mechanism_cache_config(base.meta),required_mode=mechanism_mode)
 
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_features"] = None
+        state["_mechanisms"] = None
         return state
 
     def __len__(self):
@@ -155,6 +169,16 @@ class LOSDataset(Dataset):
         row, _ = self.samples[index]
         feature = torch.from_numpy(np.array(self._features[row], copy=True)[None])
         x = torch.cat((items[0], feature), dim=0)
+        if self.mechanism_mode is not None:
+            extra = torch.zeros((4,*x.shape[-2:]),dtype=x.dtype)
+            if self.mechanism_path is not None:
+                if self._mechanisms is None:
+                    self._mechanisms = np.load(self.mechanism_path,mmap_mode="r")
+                extra = torch.from_numpy(np.array(self._mechanisms[row],copy=True))
+                if not torch.isfinite(extra).all() or (extra < 0).any() or (extra[:2] > 1).any():
+                    raise ValueError(f"Invalid D/S features at {self.split} row {row}")
+                extra = extra*self.mechanism_mask
+            x = torch.cat((x,extra),dim=0)
         if self.augment:
             positions = [i for i in range(1, len(items)) if isinstance(items[i], torch.Tensor)]
             channels, extra = self.augmentation(

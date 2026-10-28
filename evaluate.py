@@ -110,6 +110,9 @@ def main(args):
     saved = ck.get("args", {})
     arch = checkpoint_architecture(ck)
     band = args.band or saved.get("band", "58")
+    from model_factory import MECHANISM_ARCHITECTURES
+    if arch in MECHANISM_ARCHITECTURES and band != "58":
+        raise ValueError("D/S evaluation requires band 58")
     phase = args.phase or saved.get("phase", "firstU")
     # match the output that was actually trained for this phase; a secondU
     # checkpoint holds both halves, so --phase firstU scores its coarse output
@@ -148,7 +151,11 @@ def main(args):
         # Distance is constructed from augmented inputs in the model. The
         # existing cache contains F only and keeps its original metadata.
         cache_config = feature_config_for_mode(base.meta, "los")
-        base = LOSDataset(base, cache_root, cache_config)
+        mechanism = {}
+        if arch in MECHANISM_ARCHITECTURES:
+            mechanism = {"mechanism_cache": args.mechanism_cache or saved.get("mechanism_cache"),
+                         "mechanism_mode": arch.rsplit("_",1)[-1]}
+        base = LOSDataset(base, cache_root, cache_config, **mechanism)
     lo, hi = base.pl_min, base.pl_max
     scale = float(hi - lo)
     ds = ScoredSet(base, lo, hi, need_mask)
@@ -280,6 +287,8 @@ def build_parser():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--data-root", default="LunarRM")
     p.add_argument("--los-cache", default=None, help="LOS cache; defaults to the checkpoint's cache path")
+    p.add_argument("--mechanism-cache", default=None,
+                   help="D/S cache; defaults to the checkpoint's cache path")
     p.add_argument("--split", default="val", choices=["val", "test"])
     p.add_argument("--band", default=None, choices=["415", "58", "both"],
                    help="defaults to the band the checkpoint was trained on")
