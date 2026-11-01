@@ -9,10 +9,11 @@ CONV_ARCHITECTURES = ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_mul
 T_REFINEMENT_ARCHITECTURES = ("lunar_conv_tx_refine", "lunar_conv_tx_refine_frozen",
                              "lunar_conv_tx_refine_unet", "lunar_conv_tx_refine_pyramid")
 NESTED_ARCHITECTURES = ("lunar_conv_tx_nested_full", "lunar_conv_tx_nested_local")
+REGION_ARCHITECTURES = tuple(f"lunar_conv_tx_region_{mode}" for mode in ("uniform", "fixed", "learned"))
 MECHANISM_ARCHITECTURES = tuple(f"lunar_conv_tx_mechanism_{mode}" for mode in ("a","d","s","ds"))
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
                        *CONV_ARCHITECTURES, *T_REFINEMENT_ARCHITECTURES, *NESTED_ARCHITECTURES,
-                       *MECHANISM_ARCHITECTURES)
+                       *MECHANISM_ARCHITECTURES, *REGION_ARCHITECTURES)
 REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
 RADIO_ARCHITECTURES = ("radiownet", *REFINEMENT_ARCHITECTURES)
 ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
@@ -65,6 +66,10 @@ def checkpoint_architecture(checkpoint):
             raise ValueError(f"Unsupported or missing {arch} model_config")
         if checkpoint.get("args",{}).get("band") != "58":
             raise ValueError("D/S checkpoints require band 58")
+    elif arch in REGION_ARCHITECTURES:
+        from lunar_regions import region_model_config
+        if config != region_model_config(arch):
+            raise ValueError(f"Unsupported or missing {arch} model_config")
     elif arch in NESTED_ARCHITECTURES:
         from lunar_nested import nested_model_config
         if config != nested_model_config(arch):
@@ -157,6 +162,9 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
     if arch in MECHANISM_ARCHITECTURES:
         from lunar_mechanisms import LunarConvMechanisms
         return LunarConvMechanisms(feature_config,arch=arch)
+    if arch in REGION_ARCHITECTURES:
+        from lunar_regions import LunarConvRegions
+        return LunarConvRegions(feature_config, arch=arch)
     if arch in NESTED_ARCHITECTURES:
         from lunar_nested import LunarConvNested
         return LunarConvNested(feature_config, arch=arch)
@@ -173,6 +181,14 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
 def load_checkpoint(model, checkpoint, initialize=False):
     source = checkpoint_architecture(checkpoint)
     target = getattr(model, "arch", "radiownet")
+    if target in REGION_ARCHITECTURES and source == "lunar_conv_tx_content" and initialize:
+        _, _, config = checkpoint_input_config(checkpoint)
+        if config != model.feature_config or checkpoint.get("args", {}).get("phase") != "single":
+            raise ValueError("Region initialization requires matching T physical scales and phase single")
+        model.initialize_from_T(checkpoint["model"])
+        return {"source_arch": source, "target_arch": target, "strict": True,
+                "initialization": "T_shared_weights_and_shadow_copy_zero_boundary_identity",
+                "frozen_parameters": False}
     if target in T_REFINEMENT_ARCHITECTURES and source == "lunar_conv_tx_content" and initialize:
         _, _, config = checkpoint_input_config(checkpoint)
         if (config != model.feature_config or

@@ -65,6 +65,7 @@ python evaluate.py --ckpt runs/<run>_best.pt --data-root <data> --split val
 | `radiounet.py`                  | seam onto the vendored upstream model                                     |
 | `lunar_maxvit.py`              | independent lunar-input MaxViT encoder and convolution decoder              |
 | `lunar_nested.py`              | full/local UNet++-inspired nested skips inside the T baseline                |
+| `lunar_regions.py` / `region_features.py` | shared-T soft region heads and input-only boundary routing; [controls and server commands](REGION_ROUTING.md) |
 | `model_factory.py`             | architecture selection and strict, backward-compatible checkpoint loading  |
 | `benchmark_inference.py`       | batch-one timing including live physical feature construction               |
 | `mechanism_features.py` / `mechanism_geometry*.py` | optional direct-area and single-bounce specular input features |
