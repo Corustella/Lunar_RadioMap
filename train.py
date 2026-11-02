@@ -302,6 +302,13 @@ def write_panels(model, dataset, indices, device, out_idx, lo, scale,
 
 
 def prepare_args(args):
+    args.field_boundary_weight = getattr(args, "field_boundary_weight", 0.0)
+    if not math.isfinite(args.field_boundary_weight) or args.field_boundary_weight < 0:
+        raise ValueError("--field-boundary-weight must be finite and nonnegative")
+    if args.field_boundary_weight and (args.arch != "lunar_transport_field" or args.loss != "masked"):
+        raise ValueError("Boundary supervision requires lunar_transport_field and --loss masked")
+    if args.arch in ("lunar_transport_point", "lunar_transport_field") and args.band != "58":
+        raise ValueError("Transport-field experiments currently require --band 58")
     if args.stop_after_epochs is not None and not 1 <= args.stop_after_epochs <= args.epochs:
         raise ValueError("--stop-after-epochs must be between 1 and --epochs (total completed epochs)")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
@@ -412,11 +419,12 @@ def main(args):
                 raise ValueError("Resume requires the same architecture; train the new architecture from scratch")
             previous = ck.get("args", {})
             if (float(previous.get("grad_weight", 0.0)) != 0.0 or
+                    float(previous.get("field_boundary_weight", 0.0)) != args.field_boundary_weight or
                     previous.get("loss", args.loss) != args.loss or
                     previous.get("phase", args.phase) != args.phase or
                     previous.get("band", args.band) != args.band or
                     previous.get("eval_initial", False) != args.eval_initial):
-                raise ValueError("Resume requires the same loss, phase, band and initial-evaluation policy")
+                raise ValueError("Resume requires the same loss, field-boundary weight, phase, band and initial-evaluation policy")
             initial_validation = ck.get("initial_validation")
             if args.eval_initial and initial_validation is None:
                 raise ValueError("Resume checkpoint lacks its initial-validation record")
@@ -556,14 +564,24 @@ def main(args):
         model.train()
         t0 = time.time()
         running, seen = 0.0, 0
+        running_main, running_boundary = 0.0, 0.0
         train_sse = torch.zeros((), device=device, dtype=torch.float64)
         train_valid = torch.zeros((), device=device, dtype=torch.float64)
         for i, batch in enumerate(train_loader):
             x, y, m = unpack(batch, device)
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=args.amp and device.type == "cuda"):
-                pred = model(x)[out_idx]
-                loss = compute_loss(pred.float(), y, m, args.loss)
+                if args.field_boundary_weight:
+                    from transport_field import field_boundary_loss
+                    pred, boundary = model.forward_with_boundary(x, scale)
+                    main_loss = compute_loss(pred.float(), y, m, args.loss)
+                    boundary_loss = field_boundary_loss(boundary, y, m, scale)
+                    loss = main_loss + args.field_boundary_weight * boundary_loss
+                    running_main += main_loss.item() * x.size(0)
+                    running_boundary += boundary_loss.item() * x.size(0)
+                else:
+                    pred = model(x)[out_idx]
+                    loss = compute_loss(pred.float(), y, m, args.loss)
             scaler.scale(loss).backward()
             if args.clip:
                 scaler.unscale_(opt)
@@ -609,6 +627,9 @@ def main(args):
                "train/rmse_db_masked_online": math.sqrt(online_mse) * scale,
                "train/valid_pixels": valid_pixels,
                **{k: v for k, v in metrics.items()}}
+        if args.field_boundary_weight:
+            row.update({"train/main_loss": running_main / max(seen, 1),
+                        "train/field_boundary_loss": running_boundary / max(seen, 1)})
         append_history(hist_path, row, fresh=epoch == 0 and not resumed)
 
         if panel_idx and args.panels_every and epoch % args.panels_every == 0:
@@ -671,6 +692,9 @@ def build_parser():
                         "is the challenge objective. plain counts the 5.8 GHz "
                         "fill too and is kept only as an ablation; either way the "
                         "run is selected and ranked on valid pixels.")
+    p.add_argument("--field-boundary-weight", type=float, default=0.0,
+                   help="optional lunar_transport_field boundary BCE weight; 0 keeps the original loss. "
+                        "Targets use only valid official train-label neighbours; never inference inputs")
     p.add_argument("--phase", default=None, choices=["firstU", "secondU", "single"],
                    help="default: firstU for RadioWNet, single for lunar_* architectures")
     p.add_argument("--first-features", default="none", choices=FIRST_FEATURES,

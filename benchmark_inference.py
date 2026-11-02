@@ -184,6 +184,8 @@ def main(args):
     out_idx = output_index(arch, phase)
     if arch in MECHANISM_ARCHITECTURES and band != "58":
         raise ValueError("D/S timing requires band 58")
+    if arch in ("lunar_transport_point", "lunar_transport_field") and band != "58":
+        raise ValueError("Transport-field timing currently requires band 58")
 
     ld = load_dataset_module(args.data_root)
     dataset = ld.LunarRadioMapDataset(args.data_root, split=args.split, band=band,

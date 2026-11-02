@@ -110,6 +110,8 @@ def main(args):
     saved = ck.get("args", {})
     arch = checkpoint_architecture(ck)
     band = args.band or saved.get("band", "58")
+    if arch in ("lunar_transport_point", "lunar_transport_field") and band != "58":
+        raise ValueError("Transport-field evaluation currently requires band 58")
     from model_factory import MECHANISM_ARCHITECTURES
     if arch in MECHANISM_ARCHITECTURES and band != "58":
         raise ValueError("D/S evaluation requires band 58")
