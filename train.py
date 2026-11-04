@@ -86,7 +86,7 @@ from metrics import MetricAccumulator, save_example_panels
 from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
                        feature_config_for_mode)
 from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, MECHANISM_ARCHITECTURES, REFINEMENT_ARCHITECTURES, build_model,
-                           T_REFINEMENT_ARCHITECTURES, checkpoint_architecture, load_checkpoint,
+                           T_REFINEMENT_ARCHITECTURES, TRANSPORT_ARCHITECTURES, checkpoint_architecture, load_checkpoint,
                            model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
 from analysis_plots import save_training_curves
@@ -307,7 +307,7 @@ def prepare_args(args):
         raise ValueError("--field-boundary-weight must be finite and nonnegative")
     if args.field_boundary_weight and (args.arch != "lunar_transport_field" or args.loss != "masked"):
         raise ValueError("Boundary supervision requires lunar_transport_field and --loss masked")
-    if args.arch in ("lunar_transport_point", "lunar_transport_field") and args.band != "58":
+    if args.arch in TRANSPORT_ARCHITECTURES and args.band != "58":
         raise ValueError("Transport-field experiments currently require --band 58")
     if args.stop_after_epochs is not None and not 1 <= args.stop_after_epochs <= args.epochs:
         raise ValueError("--stop-after-epochs must be between 1 and --epochs (total completed epochs)")

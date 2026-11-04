@@ -6,8 +6,8 @@ from torch.nn import functional as F
 from los_features import log_distance_feature
 
 
-def transport_feature_config():
-    return {
+def transport_feature_config(polar=False):
+    config = {
         "version": 1, "external_channels": ["H", "TX", "F"],
         "physical_channels": ["H", "TX", "F", "rho"],
         "geometry_channels": ["dx/diagonal", "dy/diagonal", "dz/height_range",
@@ -18,10 +18,25 @@ def transport_feature_config():
         "query_grid": "64x64 at input centres 0,4,...,252",
         "computation": "FP32_no_autograd_after_joint_augmentation; no_RT_target_or_mask",
     }
+    if polar:
+        config.update(version=2, coordinate_frame="TX_cylindrical_polar",
+                      geometry_channels=["r/diagonal", "sin_theta", "cos_theta", "dz/height_range",
+                                         "normal_r", "normal_theta", "nz", "normal_dot_RX_to_TX", "F", "rho"],
+                      polar_origin="r=0: sin_theta=0, cos_theta=1; basis er=+x, etheta=+y",
+                      polar_basis="er=(cos_theta,sin_theta,0); etheta=(-sin_theta,cos_theta,0)",
+                      sampling="unchanged Cartesian state/query/input/output grids; no polar image resampling")
+    return config
+
+
+def polar_direction_codes(directions, geometry):
+    """Encode the original world-XY slots in each site's cylindrical basis."""
+    sine, cosine = geometry[..., 1:2], geometry[..., 2:3]
+    x, y = directions[..., 0], directions[..., 1]
+    return torch.stack((cosine * x + sine * y, -sine * x + cosine * y), dim=-1)
 
 
 @torch.no_grad()
-def transport_features(input, config):
+def transport_features(input, config, polar=False):
     """O(BHW) coordinates/geometry, recomputed after the loader's joint D4."""
     with torch.autocast(device_type=input.device.type, enabled=False):
         height_lo, height_hi = config["heightmap_range_m"]
@@ -47,7 +62,18 @@ def transport_features(input, config):
         normal = F.normalize(torch.cat((-gx, -gy, torch.ones_like(gx)), dim=1), dim=1)
         rho = log_distance_feature(input, config).float()
         diagonal = (((h - 1) * resolution) ** 2 + ((w - 1) * resolution) ** 2) ** .5
-        geometry = torch.cat((dx / diagonal, dy / diagonal, dz / height_range, normal,
-                              (normal * unit_to_tx).sum(1, keepdim=True), input[:, 2:3].float(), rho), dim=1)
+        incidence = (normal * unit_to_tx).sum(1, keepdim=True)
+        if polar:
+            radius = (dx.square() + dy.square()).sqrt()
+            cosine = torch.where(radius > 0, dx / radius.clamp_min(1e-12), torch.ones_like(radius))
+            sine = torch.where(radius > 0, dy / radius.clamp_min(1e-12), torch.zeros_like(radius))
+            nx, ny, nz = normal.split(1, dim=1)
+            radial = nx * cosine + ny * sine
+            tangent = -nx * sine + ny * cosine
+            geometry = torch.cat((radius / diagonal, sine, cosine, dz / height_range,
+                                  radial, tangent, nz, incidence, input[:, 2:3].float(), rho), dim=1)
+        else:
+            geometry = torch.cat((dx / diagonal, dy / diagonal, dz / height_range, normal,
+                                  incidence, input[:, 2:3].float(), rho), dim=1)
         physical = torch.cat((input.float(), rho), dim=1)
     return physical.to(input.dtype), geometry, tx_index

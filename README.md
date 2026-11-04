@@ -67,6 +67,7 @@ python evaluate.py --ckpt runs/<run>_best.pt --data-root <data> --split val
 | `lunar_nested.py`              | full/local UNet++-inspired nested skips inside the T baseline                |
 | `lunar_regions.py` / `region_features.py` | shared-T soft region heads and input-only boundary routing; [controls and server commands](REGION_ROUTING.md) |
 | `lunar_transport.py` / `transport_*.py` | TX-conditioned latent scene interaction and point/structured-field readouts; [model and experiments](TRANSPORT_FIELD.md) |
+| `lunar_transport_point_polar` | Coordinate-only TX polar encoding for Transport point; [definition and paired-seed commands](TRANSPORT_POLAR.md) |
 | `model_factory.py`             | architecture selection and strict, backward-compatible checkpoint loading  |
 | `benchmark_inference.py`       | batch-one timing including live physical feature construction               |
 | `mechanism_features.py` / `mechanism_geometry*.py` | optional direct-area and single-bounce specular input features |

@@ -8,6 +8,27 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from transport_features import polar_direction_codes
+
+
+def _insert_zero_input(module, index):
+    """One additional coordinate channel; retain all existing weights/biases."""
+    if isinstance(module, nn.Linear):
+        expanded = nn.Linear(module.in_features + 1, module.out_features, bias=module.bias is not None)
+    elif isinstance(module, nn.Conv2d) and module.groups == 1:
+        expanded = nn.Conv2d(module.in_channels + 1, module.out_channels, module.kernel_size,
+                             stride=module.stride, padding=module.padding, dilation=module.dilation,
+                             bias=module.bias is not None, padding_mode=module.padding_mode)
+    else:
+        raise TypeError("Coordinate expansion requires Linear or ungrouped Conv2d")
+    with torch.no_grad():
+        expanded.weight.zero_()
+        expanded.weight[:, :index].copy_(module.weight[:, :index])
+        expanded.weight[:, index+1:].copy_(module.weight[:, index:])
+        if module.bias is not None:
+            expanded.bias.copy_(module.bias)
+    return expanded
+
 
 class _TransportBlock(nn.Module):
     def __init__(self, width=64):
@@ -41,8 +62,10 @@ class SceneTransport(nn.Module):
 Dense latent attention costs O(B*L*N^2*d); a backend may materialize O(B*N^2)
 attention. Receiver readout costs O(B*Q*K*d), not O(B*65536*N*d).
 """
-    def __init__(self):
+    def __init__(self, polar=False):
         super().__init__()
+        self.polar = polar
+        self.geometry_channels = 10 if polar else 9
         self.surface = nn.Conv2d(256, 64, 1)
         self.deep = nn.Conv2d(512, 64, 1)
         self.source = nn.Sequential(nn.Linear(256 + 16 + 9, 64), nn.GELU(), nn.Linear(64, 64))
@@ -76,6 +99,15 @@ attention. Receiver readout costs O(B*Q*K*d), not O(B*65536*N*d).
             unique[:, i] = ~(indices[:, i:i+1] == indices[:, :i]).any(1)
         self.register_buffer("receiver_indices", indices, persistent=False)
         self.register_buffer("receiver_unique", unique, persistent=False)
+        if polar:
+            # Insert cos(theta) after the former two XY slots without changing
+            # common weights or the RNG used to construct subsequent modules.
+            with torch.random.fork_rng(devices=[]):
+                self.source[0] = _insert_zero_input(self.source[0], 256 + 16 + 2)
+                self.initial_geometry = _insert_zero_input(self.initial_geometry, 2)
+                for block in self.blocks:
+                    block.geometry_qk = _insert_zero_input(block.geometry_qk, 2)
+                self.receiver_query = _insert_zero_input(self.receiver_query, 64 + 2)
 
     @staticmethod
     def _source_sample(surface, full, geometry, tx_index):
@@ -88,7 +120,7 @@ attention. Receiver readout costs O(B*Q*K*d), not O(B*65536*N*d).
             context = F.grid_sample(surface.float(), grid, mode="bilinear",
                                     padding_mode="border", align_corners=True).flatten(1)
         fine = full.flatten(2).gather(2, tx_index[:, None, None].expand(batch, 16, 1)).squeeze(-1)
-        geo = geometry.flatten(2).gather(2, tx_index[:, None, None].expand(batch, 9, 1)).squeeze(-1)
+        geo = geometry.flatten(2).gather(2, tx_index[:, None, None].expand(batch, geometry.shape[1], 1)).squeeze(-1)
         return torch.cat((context.to(fine.dtype), fine, geo.to(fine.dtype)), dim=1)
 
     def encode(self, surface16, deep8, full256, geometry, tx_index):
@@ -104,7 +136,9 @@ attention. Receiver readout costs O(B*Q*K*d), not O(B*65536*N*d).
         geo = geometry[:, :, ::16, ::16].flatten(2).transpose(1, 2)
         batch = patch.shape[0]
         direction = self.directions[None, None].expand(batch, 256, -1, -1)
-        geo = torch.cat((geo[:, :, None].expand(-1, -1, 4, -1), direction), dim=-1).reshape(batch, 1024, 11)
+        if self.polar:
+            direction = polar_direction_codes(self.directions, geo)
+        geo = torch.cat((geo[:, :, None].expand(-1, -1, 4, -1), direction), dim=-1).reshape(batch, 1024, self.geometry_channels + 2)
         states = patch.flatten(2).transpose(1, 2)[:, :, None] + self.direction_embedding[None, None]
         states = states.reshape(batch, 1024, 64) + self.initial_geometry(geo.to(patch.dtype))
         for block in self.blocks:

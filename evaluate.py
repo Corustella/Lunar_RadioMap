@@ -52,7 +52,7 @@ from metrics import MetricAccumulator, save_example_panels, ssim
 from analysis_plots import save_rmse_distribution
 from radiounet import feature_config_for_mode  # noqa: E402
 from model_factory import (build_model, checkpoint_architecture, checkpoint_input_config,
-                           load_checkpoint, model_feature_config, output_index, uses_los)
+                           load_checkpoint, model_feature_config, output_index, uses_los, TRANSPORT_ARCHITECTURES)
 
 BANDS = ("415", "58")
 
@@ -110,7 +110,7 @@ def main(args):
     saved = ck.get("args", {})
     arch = checkpoint_architecture(ck)
     band = args.band or saved.get("band", "58")
-    if arch in ("lunar_transport_point", "lunar_transport_field") and band != "58":
+    if arch in TRANSPORT_ARCHITECTURES and band != "58":
         raise ValueError("Transport-field evaluation currently requires band 58")
     from model_factory import MECHANISM_ARCHITECTURES
     if arch in MECHANISM_ARCHITECTURES and band != "58":

@@ -10,11 +10,11 @@ from lunar_conv import LunarConvAligned, conv_model_config
 from lunar_maxvit import _double_conv
 from transport_features import transport_feature_config, transport_features
 from transport_field import LocalFieldRenderer, field_config
-from transport_operator import SceneTransport
+from transport_operator import SceneTransport, _insert_zero_input
 
 
 def transport_model_config(arch="lunar_transport_field"):
-    if arch not in ("lunar_transport_point", "lunar_transport_field"):
+    if arch not in ("lunar_transport_point", "lunar_transport_field", "lunar_transport_point_polar"):
         raise ValueError(f"Unsupported transport architecture {arch!r}")
     config = conv_model_config("lunar_conv_aligned")
     config["arch"] = arch
@@ -38,6 +38,15 @@ def transport_model_config(arch="lunar_transport_field"):
     config["decoder"]["transport_readout"] = field_config() if arch.endswith("field") else {
         "version": 1, "output": "FP32_1x1_normalized_total_PL_ReLU", "readout_stride": 1}
     config["output"]["parameterization"] = "overlapping_local_total_PL_field" if arch.endswith("field") else "total_PL_point_prediction"
+    if arch == "lunar_transport_point_polar":
+        config["version"] = 2
+        config["scene_transport"].update(
+            geometry=transport_feature_config(polar=True),
+            geometry_relation="learned projections of10 polar geometry scalars plus projected world-XY direction codes into Q/K; unchanged connectivity",
+            directions_encoding="same physical world-XY slots, projected to each site's er/etheta; no new slots",
+            readout_features="double3x3 Conv30->32 on D256(16)+physical(4)+geometry(10); concatenate64-channel interpolated query context ->96",
+            coordinate_initialization="copy corresponding Cartesian weights; new cos_theta input column zero and trainable; preserve post-constructor CPU RNG",
+            interpolation="identical to Cartesian transport v1; known half-pixel feature alignment convention retained for coordinate-only comparison")
     return config
 
 
@@ -66,13 +75,17 @@ class LunarTransport(nn.Module):
         super().__init__()
         self.model_config = transport_model_config(arch)
         self.arch, self.phase, self.base_inputs = arch, "single", 2
+        self.is_polar = arch == "lunar_transport_point_polar"
         self.feature_config = feature_config
         base = LunarConvAligned(feature_config, arch="lunar_conv_aligned")
         self.encoder = base.encoder
         self.full_resolution = base.full_resolution
         self.decoder = base.decoder
-        self.transport = SceneTransport()
+        self.transport = SceneTransport(polar=self.is_polar)
         self.readout_features = _double_conv(16 + 4 + 9, 32)
+        if self.is_polar:
+            with torch.random.fork_rng(devices=[]):
+                self.readout_features[0] = _insert_zero_input(self.readout_features[0], 16 + 4 + 2)
         self.is_field = arch == "lunar_transport_field"
         # Equal-seed common weights and training RNG independent of readout type.
         with torch.random.fork_rng(devices=[]):
@@ -84,7 +97,7 @@ class LunarTransport(nn.Module):
             raise ValueError("LunarTransport expects Bx3x256x256 [H,TX,F]")
         if not input.is_floating_point():
             raise ValueError("LunarTransport requires normalized floating-point input")
-        physical, geometry, tx_index = transport_features(input, self.feature_config)
+        physical, geometry, tx_index = transport_features(input, self.feature_config, polar=self.is_polar)
         full = self.full_resolution(physical)
         stem = self.encoder.stem(physical)
         features = [full, stem]

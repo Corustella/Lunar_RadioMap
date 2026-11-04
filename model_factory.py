@@ -10,7 +10,7 @@ T_REFINEMENT_ARCHITECTURES = ("lunar_conv_tx_refine", "lunar_conv_tx_refine_froz
                              "lunar_conv_tx_refine_unet", "lunar_conv_tx_refine_pyramid")
 NESTED_ARCHITECTURES = ("lunar_conv_tx_nested_full", "lunar_conv_tx_nested_local")
 REGION_ARCHITECTURES = tuple(f"lunar_conv_tx_region_{mode}" for mode in ("uniform", "fixed", "learned"))
-TRANSPORT_ARCHITECTURES = ("lunar_transport_point", "lunar_transport_field")
+TRANSPORT_ARCHITECTURES = ("lunar_transport_point", "lunar_transport_field", "lunar_transport_point_polar")
 MECHANISM_ARCHITECTURES = tuple(f"lunar_conv_tx_mechanism_{mode}" for mode in ("a","d","s","ds"))
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
                        *CONV_ARCHITECTURES, *T_REFINEMENT_ARCHITECTURES, *NESTED_ARCHITECTURES,
