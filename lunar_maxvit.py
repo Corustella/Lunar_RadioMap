@@ -290,6 +290,16 @@ class LunarMaxViT(nn.Module):
             with torch.random.fork_rng(devices=[]):
                 self.tx_scene_attention = _TXSceneAttention()
 
+    def _encoder_features(self, physical, input):
+        features = [self.full_resolution(physical), self.encoder.stem(physical)]
+        encoded = features[-1]
+        for index, block in enumerate(self.encoder.blocks):
+            encoded = block(encoded)
+            if index == 1 and self.tx_scene_attention is not None:
+                encoded = self.tx_scene_attention(encoded, input[:, 1:2], input[:, :1])
+            features.append(encoded)
+        return features
+
     def forward_features(self, input):
         """Return the prediction, physical inputs and decoder states at 64/128/256.
 
@@ -303,13 +313,8 @@ class LunarMaxViT(nn.Module):
             raise ValueError("LunarMaxViT requires normalized floating-point input")
         distance = log_distance_feature(input, self.feature_config)
         physical = torch.cat((input, distance), dim=1)
-        features = [self.full_resolution(physical), self.encoder.stem(physical)]
+        features = self._encoder_features(physical, input)
         encoded = features[-1]
-        for index, block in enumerate(self.encoder.blocks):
-            encoded = block(encoded)
-            if index == 1 and self.tx_scene_attention is not None:
-                encoded = self.tx_scene_attention(encoded, input[:, 1:2], input[:, :1])
-            features.append(encoded)
         # Skips are, in order, block3/block2/block1/stem/full-resolution.
         decoded = []
         for decoder, skip in zip(self.decoder, reversed(features[:-1])):

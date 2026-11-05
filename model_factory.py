@@ -9,12 +9,14 @@ CONV_ARCHITECTURES = ("lunar_conv_aligned", "lunar_conv_local3", "lunar_conv_mul
 T_REFINEMENT_ARCHITECTURES = ("lunar_conv_tx_refine", "lunar_conv_tx_refine_frozen",
                              "lunar_conv_tx_refine_unet", "lunar_conv_tx_refine_pyramid")
 NESTED_ARCHITECTURES = ("lunar_conv_tx_nested_full", "lunar_conv_tx_nested_local")
+HIGHRES_ARCHITECTURE = "lunar_conv_tx_highres"
 REGION_ARCHITECTURES = tuple(f"lunar_conv_tx_region_{mode}" for mode in ("uniform", "fixed", "learned"))
 TRANSPORT_ARCHITECTURES = ("lunar_transport_point", "lunar_transport_field", "lunar_transport_point_polar")
 MECHANISM_ARCHITECTURES = tuple(f"lunar_conv_tx_mechanism_{mode}" for mode in ("a","d","s","ds"))
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
                        *CONV_ARCHITECTURES, *T_REFINEMENT_ARCHITECTURES, *NESTED_ARCHITECTURES,
-                       *MECHANISM_ARCHITECTURES, *REGION_ARCHITECTURES, *TRANSPORT_ARCHITECTURES)
+                       HIGHRES_ARCHITECTURE, *MECHANISM_ARCHITECTURES, *REGION_ARCHITECTURES,
+                       *TRANSPORT_ARCHITECTURES)
 REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
 RADIO_ARCHITECTURES = ("radiownet", *REFINEMENT_ARCHITECTURES)
 ARCHITECTURES = (*RADIO_ARCHITECTURES, *LUNAR_ARCHITECTURES)
@@ -80,6 +82,10 @@ def checkpoint_architecture(checkpoint):
     elif arch in NESTED_ARCHITECTURES:
         from lunar_nested import nested_model_config
         if config != nested_model_config(arch):
+            raise ValueError(f"Unsupported or missing {arch} model_config")
+    elif arch == HIGHRES_ARCHITECTURE:
+        from lunar_highres import highres_model_config
+        if config != highres_model_config():
             raise ValueError(f"Unsupported or missing {arch} model_config")
     elif arch in T_REFINEMENT_ARCHITECTURES:
         from lunar_refinement import refinement_model_config
@@ -178,6 +184,9 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
     if arch in NESTED_ARCHITECTURES:
         from lunar_nested import LunarConvNested
         return LunarConvNested(feature_config, arch=arch)
+    if arch == HIGHRES_ARCHITECTURE:
+        from lunar_highres import LunarConvHighRes
+        return LunarConvHighRes(feature_config)
     if arch in T_REFINEMENT_ARCHITECTURES:
         from lunar_refinement import LunarConvRefine
         return LunarConvRefine(feature_config, arch=arch)
