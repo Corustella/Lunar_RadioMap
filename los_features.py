@@ -129,7 +129,7 @@ class LOSDataset(Dataset):
     """
 
     def __init__(self, base, cache_root, config, augment=False, augmentation=None,
-                 mechanism_cache=None, mechanism_mode=None):
+                 mechanism_cache=None, mechanism_mode=None, block_teacher_path=None):
         if base.augment or not base.normalize:
             raise ValueError("LOS adapter needs an unaugmented, normalized base dataset")
         if augment and augmentation is None:
@@ -139,6 +139,8 @@ class LOSDataset(Dataset):
         self.pl_min, self.pl_max, self.split = base.pl_min, base.pl_max, base.split
         self.path = read_cache(cache_root, base, config)
         self._features = None
+        self.block_teacher_path = block_teacher_path
+        self._block_teacher = None
         self.mechanism_mode, self.mechanism_path = mechanism_mode, None
         self._mechanisms = None
         if mechanism_mode is not None:
@@ -156,6 +158,7 @@ class LOSDataset(Dataset):
         state = self.__dict__.copy()
         state["_features"] = None
         state["_mechanisms"] = None
+        state["_block_teacher"] = None
         return state
 
     def __len__(self):
@@ -179,6 +182,10 @@ class LOSDataset(Dataset):
                     raise ValueError(f"Invalid D/S features at {self.split} row {row}")
                 extra = extra*self.mechanism_mask
             x = torch.cat((x,extra),dim=0)
+        if self.block_teacher_path is not None:
+            if self._block_teacher is None:
+                self._block_teacher = np.load(self.block_teacher_path, mmap_mode="r")
+            items.append(torch.from_numpy(np.array(self._block_teacher[row], copy=True)[None]))
         if self.augment:
             positions = [i for i in range(1, len(items)) if isinstance(items[i], torch.Tensor)]
             channels, extra = self.augmentation(

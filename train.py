@@ -90,6 +90,7 @@ from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, MECHANISM_ARCHITE
                            model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
 from analysis_plots import save_training_curves
+from block_distillation import block_teacher_loss, read_teacher_cache
 
 
 def load_dataset_module(data_root):
@@ -223,6 +224,10 @@ def make_loaders(ld, args):
     train_ds = ld.LunarRadioMapDataset(split="train", augment=not args.no_augment and not use_los,
                                        **common)
     val_ds = ld.LunarRadioMapDataset(split="val", augment=False, **common)
+    teacher_path, teacher_objective = None, None
+    if args.block_teacher_cache:
+        teacher_path, teacher_objective = read_teacher_cache(
+            args.block_teacher_cache, train_ds, model_feature_config(train_ds.meta, args.arch))
     if use_los:
         from los_features import LOSDataset
         if not args.los_cache:
@@ -233,7 +238,8 @@ def make_loaders(ld, args):
             mechanism = {"mechanism_cache": args.mechanism_cache,
                          "mechanism_mode": args.arch.rsplit("_",1)[-1]}
         train_ds = LOSDataset(train_ds, args.los_cache, config,
-                              augment=not args.no_augment, augmentation=ld._augment, **mechanism)
+                              augment=not args.no_augment, augmentation=ld._augment,
+                              block_teacher_path=teacher_path, **mechanism)
         val_ds = LOSDataset(val_ds, args.los_cache, config, **mechanism)
     print(f"samples: {len(train_ds)} train / {len(val_ds)} val")
 
@@ -241,7 +247,7 @@ def make_loaders(ld, args):
               pin_memory=True, persistent_workers=args.num_workers > 0,
               drop_last=False)
     return (DataLoader(train_ds, shuffle=True, **dl),
-            DataLoader(val_ds, shuffle=False, **dl), train_ds)
+            DataLoader(val_ds, shuffle=False, **dl), train_ds, teacher_objective)
 
 
 def unpack(batch, device):
@@ -346,6 +352,9 @@ def prepare_args(args):
         args.init_from = "auto"
     if args.init_from in ("none", "scratch", ""):
         args.init_from = None
+    if args.block_teacher_cache and (args.arch != "lunar_conv_tx_content" or args.band != "58"
+                                    or args.loss != "masked" or args.init_from or args.eval_initial):
+        raise ValueError("Block teacher cache requires band 58 T with masked loss and scratch training")
     if args.eval_initial and not (args.init_from or args.resume):
         raise ValueError("--eval-initial requires --init-from or --resume")
     if args.arch in T_REFINEMENT_ARCHITECTURES and not args.eval_initial:
@@ -365,7 +374,9 @@ def main(args):
     set_seed(args.seed)
     device = torch.device(args.device)
 
-    train_loader, val_loader, ds = make_loaders(ld, args)
+    train_loader, val_loader, ds, teacher_objective = make_loaders(ld, args)
+    if teacher_objective:
+        print(f"block distillation: {teacher_objective}")
 
     # dB per unit of normalized target so RMSE is reported in real units
     lo, hi = ds.pl_min, ds.pl_max
@@ -417,6 +428,8 @@ def main(args):
             ck = torch.load(path, map_location=device, weights_only=False)
             if checkpoint_architecture(ck) != args.arch:
                 raise ValueError("Resume requires the same architecture; train the new architecture from scratch")
+            if ck.get("block_distillation") != teacher_objective:
+                raise ValueError("Resume requires the same block-distillation objective and teacher cache")
             previous = ck.get("args", {})
             if (float(previous.get("grad_weight", 0.0)) != 0.0 or
                     float(previous.get("field_boundary_weight", 0.0)) != args.field_boundary_weight or
@@ -507,6 +520,7 @@ def main(args):
                 "lr_sched": args.lr_sched, "epoch": epoch, "best": best,
                 "args": vars(args), "metrics": metrics, "feature_config": feature_config,
                 "model_config": model.model_config, "optimizer_config": optimizer_config,
+                "block_distillation": teacher_objective,
                 "initial_validation": initial_validation}
 
     if args.eval_initial and not resumed:
@@ -537,6 +551,7 @@ def main(args):
     provenance["feature_config"] = feature_config
     provenance["model_config"] = model.model_config
     provenance["optimizer_config"] = optimizer_config
+    provenance["block_distillation"] = teacher_objective
     if args.arch in LUNAR_ARCHITECTURES:
         from importlib.metadata import version
         provenance["environment"]["torchvision"] = version("torchvision")
@@ -567,6 +582,9 @@ def main(args):
         running_main, running_boundary = 0.0, 0.0
         train_sse = torch.zeros((), device=device, dtype=torch.float64)
         train_valid = torch.zeros((), device=device, dtype=torch.float64)
+        if teacher_objective:
+            block_sse = torch.zeros((), device=device, dtype=torch.float64)
+            block_count = torch.zeros((), device=device, dtype=torch.int64)
         for i, batch in enumerate(train_loader):
             x, y, m = unpack(batch, device)
             opt.zero_grad(set_to_none=True)
@@ -582,6 +600,12 @@ def main(args):
                 else:
                     pred = model(x)[out_idx]
                     loss = compute_loss(pred.float(), y, m, args.loss)
+            if teacher_objective:
+                teacher = batch[3].to(device, non_blocking=True)
+                aux, sse, count = block_teacher_loss(pred, teacher, m)
+                loss = loss + teacher_objective["weight"] * aux
+                block_sse += sse
+                block_count += count
             scaler.scale(loss).backward()
             if args.clip:
                 scaler.unscale_(opt)
@@ -630,6 +654,11 @@ def main(args):
         if args.field_boundary_weight:
             row.update({"train/main_loss": running_main / max(seen, 1),
                         "train/field_boundary_loss": running_boundary / max(seen, 1)})
+        if teacher_objective:
+            valid_blocks = block_count.item()
+            row.update({"train/mse_block_teacher_online": block_sse.item() / valid_blocks
+                        if valid_blocks else float("nan"),
+                        "train/block_teacher_valid_blocks": valid_blocks})
         append_history(hist_path, row, fresh=epoch == 0 and not resumed)
 
         if panel_idx and args.panels_every and epoch % args.panels_every == 0:
@@ -668,6 +697,7 @@ def main(args):
                    "phase": args.phase, "arch": args.arch, "init_from": args.init_from,
                    "model_config": model.model_config,
                    "optimizer_config": optimizer_config,
+                   "block_distillation": teacher_objective,
                    "first_features": args.first_features,
                    "second_features": args.second_features, "feature_config": feature_config,
                    "selection_metric": "val/rmse_db_masked",
@@ -702,6 +732,8 @@ def build_parser():
     p.add_argument("--second-features", default="none", choices=SECOND_FEATURES,
                    help="secondU inputs: none, los [F,0,0], or los_distance [F,rho,0]")
     p.add_argument("--los-cache", default=None, help="cache directory built by build_los_cache.py")
+    p.add_argument("--block-teacher-cache", default=None,
+                   help="train-only nested teacher targets from build_block_teacher_cache.py (band 58 T)")
     p.add_argument("--mechanism-cache", default=None,
                    help="separate four-channel cache from build_los_cache.py --feature-set mechanisms")
     p.add_argument("--epochs", type=int, default=50)
