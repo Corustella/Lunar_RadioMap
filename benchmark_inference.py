@@ -30,7 +30,8 @@ import torch
 from los_features import clearance_feature
 from model_factory import (ARCHITECTURES, RADIO_ARCHITECTURES, MECHANISM_ARCHITECTURES, build_model, checkpoint_architecture,
                            checkpoint_input_config, load_checkpoint,
-                           model_feature_config, output_index, TRANSPORT_ARCHITECTURES)
+                           model_feature_config, output_index, TRANSPORT_ARCHITECTURES,
+                           RAYSWEEP_ARCHITECTURES)
 from radiounet import feature_config_for_mode
 from train import load_dataset_module
 
@@ -186,6 +187,8 @@ def main(args):
         raise ValueError("D/S timing requires band 58")
     if arch in TRANSPORT_ARCHITECTURES and band != "58":
         raise ValueError("Transport-field timing currently requires band 58")
+    if arch in RAYSWEEP_ARCHITECTURES and band != "58":
+        raise ValueError("RaySweep timing requires band 58")
 
     ld = load_dataset_module(args.data_root)
     dataset = ld.LunarRadioMapDataset(args.data_root, split=args.split, band=band,

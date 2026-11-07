@@ -86,11 +86,13 @@ from metrics import MetricAccumulator, save_example_panels
 from radiounet import (RadioWNet, trains_in_phase, FIRST_FEATURES, SECOND_FEATURES,
                        feature_config_for_mode)
 from model_factory import (ARCHITECTURES, LUNAR_ARCHITECTURES, MECHANISM_ARCHITECTURES, REFINEMENT_ARCHITECTURES, build_model,
-                           T_REFINEMENT_ARCHITECTURES, TRANSPORT_ARCHITECTURES, checkpoint_architecture, load_checkpoint,
+                           T_REFINEMENT_ARCHITECTURES, TRANSPORT_ARCHITECTURES, RAYSWEEP_ARCHITECTURES,
+                           checkpoint_architecture, load_checkpoint,
                            model_feature_config, output_index, uses_los)
 from experiment_provenance import collect_provenance
 from analysis_plots import save_training_curves
 from block_distillation import block_teacher_loss, read_teacher_cache
+from early_stopping import EarlyStopping
 
 
 def load_dataset_module(data_root):
@@ -195,6 +197,17 @@ def append_history(path, row, fresh=False):
         if fresh or handle.tell() == 0:
             writer.writeheader()
         writer.writerow(row)
+
+
+def save_checkpoint(state, path):
+    with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), suffix=".pt", delete=False) as handle:
+        temporary = handle.name
+    try:
+        torch.save(state, temporary)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def resolve_init_from(args):
@@ -315,6 +328,10 @@ def prepare_args(args):
         raise ValueError("Boundary supervision requires lunar_transport_field and --loss masked")
     if args.arch in TRANSPORT_ARCHITECTURES and args.band != "58":
         raise ValueError("Transport-field experiments currently require --band 58")
+    if args.arch in RAYSWEEP_ARCHITECTURES and args.band != "58":
+        raise ValueError("RaySweep experiments require --band 58")
+    if args.early_stop_min_epochs > args.epochs:
+        raise ValueError("--early-stop-min-epochs cannot exceed --epochs")
     if args.stop_after_epochs is not None and not 1 <= args.stop_after_epochs <= args.epochs:
         raise ValueError("--stop-after-epochs must be between 1 and --epochs (total completed epochs)")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
@@ -363,6 +380,8 @@ def prepare_args(args):
 
 def main(args):
     prepare_args(args)
+    early_stopping = EarlyStopping(args.early_stop_patience, args.early_stop_min_epochs,
+                                   args.early_stop_min_delta)
     if args.arch == "radiownet" and args.first_features == "los" and args.second_features == "none":
         raise ValueError("--first-features los requires LOS secondU features")
     if (args.arch == "radiownet" and args.second_features != "none" and
@@ -430,6 +449,7 @@ def main(args):
                 raise ValueError("Resume requires the same architecture; train the new architecture from scratch")
             if ck.get("block_distillation") != teacher_objective:
                 raise ValueError("Resume requires the same block-distillation objective and teacher cache")
+            early_stopping.load_state_dict(ck.get("early_stopping"))
             previous = ck.get("args", {})
             if (float(previous.get("grad_weight", 0.0)) != 0.0 or
                     float(previous.get("field_boundary_weight", 0.0)) != args.field_boundary_weight or
@@ -508,7 +528,11 @@ def main(args):
         raise ValueError("No checkpoint to resume; this experiment requires an explicit --init-from path")
 
     end_epoch = args.epochs if args.stop_after_epochs is None else args.stop_after_epochs
-    if start_epoch >= end_epoch:
+    already_stopped = early_stopping.stopped
+    if already_stopped:
+        print("checkpoint already reached early stopping; finalizing recorded best and summary")
+        end_epoch = start_epoch
+    if start_epoch >= end_epoch and not already_stopped:
         print(f"already completed {start_epoch} epochs; requested stop is {end_epoch}; no training")
         return
     if end_epoch < args.epochs:
@@ -521,6 +545,7 @@ def main(args):
                 "args": vars(args), "metrics": metrics, "feature_config": feature_config,
                 "model_config": model.model_config, "optimizer_config": optimizer_config,
                 "block_distillation": teacher_objective,
+                "early_stopping": early_stopping.state_dict(),
                 "initial_validation": initial_validation}
 
     if args.eval_initial and not resumed:
@@ -534,6 +559,7 @@ def main(args):
         best = metrics["val/rmse_db_masked"]
         if not math.isfinite(best):
             raise ValueError("Initial validation has no finite masked RMSE")
+        early_stopping.update(best, -1)
         initial_validation.update(epoch=-1, metrics=metrics, limit_batches=args.limit_batches,
                                   seconds=time.time() - t0)
         with open(os.path.join(args.out, f"{args.run_name}_initial.json"), "w", encoding="utf-8") as handle:
@@ -541,8 +567,8 @@ def main(args):
         # Epoch -1 is a resumable, untrained starting point, not a new result.
         # Keeping both files also permits recovery if interrupted before ep0.
         state = make_state(-1, metrics)
-        torch.save(state, ckpt_best)
-        torch.save(state, ckpt_last)
+        save_checkpoint(state, ckpt_best)
+        save_checkpoint(state, ckpt_last)
         print(f"initial validation: {best:.6f} dB; retained as epoch -1 best", flush=True)
 
     provenance = collect_provenance(args.data_root, ld, checkpoint_sources, args)
@@ -552,6 +578,7 @@ def main(args):
     provenance["model_config"] = model.model_config
     provenance["optimizer_config"] = optimizer_config
     provenance["block_distillation"] = teacher_objective
+    provenance["early_stopping"] = early_stopping.state_dict()
     if args.arch in LUNAR_ARCHITECTURES:
         from importlib.metadata import version
         provenance["environment"]["torchvision"] = version("torchvision")
@@ -575,6 +602,7 @@ def main(args):
           f"arch={args.arch} phase={args.phase} in_ch={in_ch} scale={scale:.1f} dB "
           f"first_features={args.first_features} second_features={args.second_features}")
 
+    completed_epochs = start_epoch
     for epoch in range(start_epoch, end_epoch):
         model.train()
         t0 = time.time()
@@ -644,6 +672,9 @@ def main(args):
                f"ssim {metrics['val/ssim']:.4f}  "
                f"[all-px {metrics['val/rmse_db']:.3f} dB]")
         print(msg + f"  ({dt:.0f}s)", flush=True)
+        sel = metrics["val/rmse_db_masked"]
+        stop_now = early_stopping.update(sel, epoch)
+        completed_epochs = epoch + 1
 
         row = {"epoch": epoch, "train_loss": train_loss, "lr": epoch_lr,
                "epoch_seconds": round(dt, 1),
@@ -659,6 +690,8 @@ def main(args):
             row.update({"train/mse_block_teacher_online": block_sse.item() / valid_blocks
                         if valid_blocks else float("nan"),
                         "train/block_teacher_valid_blocks": valid_blocks})
+        if args.early_stop_patience:
+            row["early_stop/bad_epochs"] = early_stopping.bad_epochs
         append_history(hist_path, row, fresh=epoch == 0 and not resumed)
 
         if panel_idx and args.panels_every and epoch % args.panels_every == 0:
@@ -670,17 +703,23 @@ def main(args):
         # Always select on the ranking metric, even for a --loss plain ablation.
         # Selecting a plain run on all-pixel RMSE would pick the checkpoint that
         # best reproduces the 5.8 GHz fill, which is not what it is scored on.
-        sel = metrics["val/rmse_db_masked"]
         improved = sel < best
         if improved:
             best = sel
         state = make_state(epoch, metrics)
-        torch.save(state, ckpt_last)
+        save_checkpoint(state, ckpt_last)
         if improved:
-            torch.save(state, ckpt_best)
+            save_checkpoint(state, ckpt_best)
             print(f"  new best {best:.4f} dB -> {ckpt_best}")
-        if args.plots_every and (epoch % args.plots_every == 0 or epoch == end_epoch - 1):
+        if args.plots_every and (epoch % args.plots_every == 0 or epoch == end_epoch - 1 or stop_now):
             save_training_curves(hist_path, os.path.join(args.out, f"{args.run_name}_curves.png"))
+        if stop_now:
+            print(f"early stopping after {completed_epochs} epochs; "
+                  f"{early_stopping.bad_epochs} epochs without the required improvement", flush=True)
+            break
+
+    if already_stopped and args.plots_every:
+        save_training_curves(hist_path, os.path.join(args.out, f"{args.run_name}_curves.png"))
 
     # Separate best panels from the rolling snapshot; use validation AMP mode.
     if panel_idx and os.path.exists(ckpt_best):
@@ -703,7 +742,9 @@ def main(args):
                    "selection_metric": "val/rmse_db_masked",
                    "initial_validation": initial_validation,
                    "best": best, "epochs": args.epochs,
-                   "completed_epochs": end_epoch,
+                   "completed_epochs": completed_epochs,
+                   "stopped_early": early_stopping.stopped,
+                   "early_stopping": early_stopping.state_dict(),
                    "stop_after_epochs": args.stop_after_epochs}, f, indent=2)
     print(f"done. best {best:.4f} dB (valid pixels only)")
 
@@ -737,6 +778,12 @@ def build_parser():
     p.add_argument("--mechanism-cache", default=None,
                    help="separate four-channel cache from build_los_cache.py --feature-set mechanisms")
     p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--early-stop-patience", type=int, default=0,
+                   help="validation epochs without sufficient masked RMSE improvement; 0 disables")
+    p.add_argument("--early-stop-min-epochs", type=int, default=0,
+                   help="minimum completed epochs before early stopping may trigger")
+    p.add_argument("--early-stop-min-delta", type=float, default=0.0,
+                   help="minimum improvement in validation masked RMSE, in dB; best still uses strict RMSE")
     p.add_argument("--stop-after-epochs", type=int, default=None,
                    help="stop after this many total completed epochs, preserving --epochs as the LR "
                         "horizon; remove this option to continue with --resume auto")

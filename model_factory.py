@@ -10,12 +10,13 @@ T_REFINEMENT_ARCHITECTURES = ("lunar_conv_tx_refine", "lunar_conv_tx_refine_froz
                              "lunar_conv_tx_refine_unet", "lunar_conv_tx_refine_pyramid")
 NESTED_ARCHITECTURES = ("lunar_conv_tx_nested_full", "lunar_conv_tx_nested_local")
 HIGHRES_ARCHITECTURE = "lunar_conv_tx_highres"
+RAYSWEEP_ARCHITECTURES = ("lunar_raysweep_sweep", "lunar_raysweep_scatter", "lunar_raysweep_full")
 REGION_ARCHITECTURES = tuple(f"lunar_conv_tx_region_{mode}" for mode in ("uniform", "fixed", "learned"))
 TRANSPORT_ARCHITECTURES = ("lunar_transport_point", "lunar_transport_field", "lunar_transport_point_polar")
 MECHANISM_ARCHITECTURES = tuple(f"lunar_conv_tx_mechanism_{mode}" for mode in ("a","d","s","ds"))
 LUNAR_ARCHITECTURES = ("lunar_maxvit", "lunar_maxvit_fade", "lunar_maxvit_c",
                        *CONV_ARCHITECTURES, *T_REFINEMENT_ARCHITECTURES, *NESTED_ARCHITECTURES,
-                       HIGHRES_ARCHITECTURE, *MECHANISM_ARCHITECTURES, *REGION_ARCHITECTURES,
+                       HIGHRES_ARCHITECTURE, *RAYSWEEP_ARCHITECTURES, *MECHANISM_ARCHITECTURES, *REGION_ARCHITECTURES,
                        *TRANSPORT_ARCHITECTURES)
 REFINEMENT_ARCHITECTURES = ("radiownet_tx_direction", "radiownet_path_profile", "radiownet_biscale")
 RADIO_ARCHITECTURES = ("radiownet", *REFINEMENT_ARCHITECTURES)
@@ -87,6 +88,10 @@ def checkpoint_architecture(checkpoint):
         from lunar_highres import highres_model_config
         if config != highres_model_config():
             raise ValueError(f"Unsupported or missing {arch} model_config")
+    elif arch in RAYSWEEP_ARCHITECTURES:
+        from lunar_raysweep import raysweep_model_config
+        if config != raysweep_model_config(arch) or checkpoint.get("args", {}).get("band") != "58":
+            raise ValueError(f"Invalid {arch} configuration or band; RaySweep requires band 58")
     elif arch in T_REFINEMENT_ARCHITECTURES:
         from lunar_refinement import refinement_model_config
         if config != refinement_model_config(arch):
@@ -178,6 +183,9 @@ def build_model(arch="radiownet", inputs=2, phase="firstU", feature_config=None,
     if arch in TRANSPORT_ARCHITECTURES:
         from lunar_transport import LunarTransport
         return LunarTransport(feature_config, arch=arch)
+    if arch in RAYSWEEP_ARCHITECTURES:
+        from lunar_raysweep import LunarRaySweepNet
+        return LunarRaySweepNet(feature_config, arch=arch)
     if arch in REGION_ARCHITECTURES:
         from lunar_regions import LunarConvRegions
         return LunarConvRegions(feature_config, arch=arch)
