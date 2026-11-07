@@ -282,7 +282,7 @@ def main(args):
                   "input_read_plus_total_ms": "Input readers plus the complete measured inference path",
                   "excluded": "Model/checkpoint loading, metadata/index parsing, warmup (including JIT) and report serialization"},
               "summary": summary, "per_sample": rows}
-    if arch in MECHANISM_ARCHITECTURES:
+    if arch in (*MECHANISM_ARCHITECTURES, *RAYSWEEP_ARCHITECTURES):
         from experiment_provenance import collect_provenance
         report["provenance"] = collect_provenance(
             args.data_root,ld,{"weights":args.ckpt} if args.ckpt else {},args)
